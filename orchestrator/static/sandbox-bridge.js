@@ -139,6 +139,16 @@
           stateManager.setConnectionStatus('connected');
         }
 
+        // Register Wasm runtimes (Pyodide for Python, WebR for R)
+        if (window.MRMD_PYODIDE_RUNTIME) {
+          editor.registerRuntime('python', window.MRMD_PYODIDE_RUNTIME);
+          console.log('[sandbox-bridge] Registered Pyodide runtime for Python');
+        }
+        if (window.MRMD_WEBR_RUNTIME) {
+          editor.registerRuntime('r', window.MRMD_WEBR_RUNTIME);
+          console.log('[sandbox-bridge] Registered WebR runtime for R');
+        }
+
         return editor;
       },
 

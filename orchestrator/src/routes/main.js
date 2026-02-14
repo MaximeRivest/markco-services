@@ -846,7 +846,7 @@ router.get('/sandbox', async (_req, res) => {
   // 1. Replace CSP to allow Pyodide CDN, AI API endpoints, and sandbox assets
   html = html.replace(
     /<meta\s+http-equiv="Content-Security-Policy"[^>]*>/i,
-    `<meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; connect-src 'self' https: http: data: blob: ws: wss:; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://esm.sh https://unpkg.com https://cdn.jsdelivr.net https://cdnjs.cloudflare.com blob:; font-src 'self' https://fonts.gstatic.com data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https:; img-src 'self' data: blob: https: http:; frame-src 'self' blob: data:; worker-src 'self' blob:;">`
+    `<meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; connect-src 'self' https: http: data: blob: ws: wss:; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://esm.sh https://unpkg.com https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://webr.r-wasm.org blob:; font-src 'self' https://fonts.gstatic.com data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https:; img-src 'self' data: blob: https: http:; frame-src 'self' blob: data:; worker-src 'self' blob: https://cdn.jsdelivr.net https://webr.r-wasm.org;">`
   );
 
   // 2. Replace editor script path
@@ -865,7 +865,7 @@ router.get('/sandbox', async (_req, res) => {
   html = html.replace(/src="\.\/node_modules\/xterm-addon-fit\/lib\//g, 'src="/static/xterm/');
   html = html.replace(/src="\.\/node_modules\/xterm-addon-web-links\/lib\//g, 'src="/static/xterm/');
 
-  // 5. Inject browser-shim.js BEFORE the mrmd editor script
+  // 5. Inject browser-shim.js BEFORE the mrmd editor script, runtimes AFTER
   html = html.replace(
     '<script src="/static/mrmd.iife.js"></script>',
     `<!-- Sandbox shim: IndexedDB-backed electronAPI -->
@@ -873,7 +873,11 @@ router.get('/sandbox', async (_req, res) => {
 
   <script src="/static/mrmd.iife.js"></script>
 
-  <!-- Sandbox bridge: patches mrmd.drive() for local editing -->
+  <!-- Wasm runtimes (lazy-loaded on first use) -->
+  <script src="/static/pyodide-runtime.js"></script>
+  <script src="/static/webr-runtime.js"></script>
+
+  <!-- Sandbox bridge: patches mrmd.drive() for local editing, registers runtimes -->
   <script src="/static/sandbox-bridge.js"></script>`
   );
 

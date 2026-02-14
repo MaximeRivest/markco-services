@@ -25,6 +25,8 @@
   const STORE_NAME = 'files';
   const SETTINGS_KEY = 'markco.sandbox.settings';
   const RECENT_KEY = 'markco.sandbox.recent';
+  const SEED_VERSION_KEY = 'markco.sandbox.seed-version';
+  const CURRENT_SEED_VERSION = 2; // Bump when DEFAULT_WELCOME_DOC changes
 
   // ========================================================================
   // IndexedDB Virtual Filesystem
@@ -203,6 +205,41 @@ console.log("Current time:", now);
 ({ greeting, now })
 \`\`\`
 
+## Try Python
+
+Python runs via Pyodide (WebAssembly). First run downloads the runtime (~10MB, cached after).
+
+\`\`\`python
+import sys
+print(f"Python {sys.version}")
+print("Running entirely in your browser via WebAssembly!")
+
+data = [1, 2, 3, 4, 5]
+mean = sum(data) / len(data)
+print(f"Mean of {data} = {mean}")
+\`\`\`
+
+numpy, pandas, matplotlib, and many other packages auto-install on import:
+
+\`\`\`python
+import numpy as np
+x = np.linspace(0, 2 * np.pi, 100)
+print(f"Generated {len(x)} points from 0 to 2π")
+print(f"sin(π/2) = {np.sin(np.pi/2):.4f}")
+\`\`\`
+
+## Try R
+
+R runs via WebR (WebAssembly). First run downloads the runtime (~20MB, cached after).
+
+\`\`\`r
+cat("Hello from R!\\n")
+x <- 1:10
+cat("Mean of 1:10 =", mean(x), "\\n")
+cat("SD of 1:10 =", round(sd(x), 4), "\\n")
+summary(x)
+\`\`\`
+
 ## Try HTML
 
 \`\`\`html
@@ -214,21 +251,25 @@ console.log("Current time:", now);
 
 ## What works here
 
-- **JavaScript** and **HTML** run in your browser (Shift+Enter to execute)
-- **Files & folders** are saved in IndexedDB (this browser only)
+- **JavaScript** and **HTML** — instant, runs in browser
+- **Python** — via Pyodide (WebAssembly), with numpy/pandas/matplotlib
+- **R** — via WebR (WebAssembly), with base R packages
+- **Files & folders** — saved in IndexedDB (this browser only)
 - **Themes** — use the theme picker in the bottom bar
 - **Navigation** — Cmd/Ctrl+P to open files, sidebar for project tree
 
 ## Want more?
 
-[Sign in](/) for Python, Bash, R, Julia runtimes, AI commands,
+[Sign in](/) for Bash, Julia, terminal access, AI commands,
 collaboration, and cloud persistence.
 `;
 
   async function seedDefaultProject() {
     const root = await fsGet(SANDBOX_ROOT);
-    if (root) {
-      // Already seeded — but ensure welcome.md exists (might have been deleted)
+    const lastSeedVersion = parseInt(localStorage.getItem(SEED_VERSION_KEY) || '0', 10);
+
+    if (root && lastSeedVersion >= CURRENT_SEED_VERSION) {
+      // Already seeded at current version — but ensure welcome.md exists
       const welcome = await fsGet(SANDBOX_ROOT + '/welcome.md');
       if (!welcome) {
         const now = Date.now();
@@ -245,6 +286,22 @@ collaboration, and cloud persistence.
       return;
     }
 
+    if (root && lastSeedVersion < CURRENT_SEED_VERSION) {
+      // Seed version changed — update welcome.md with new content
+      const now = Date.now();
+      await fsPut({
+        path: SANDBOX_ROOT + '/welcome.md',
+        parent: SANDBOX_ROOT,
+        content: DEFAULT_WELCOME_DOC,
+        isDir: false,
+        created: now,
+        modified: now,
+      });
+      localStorage.setItem(SEED_VERSION_KEY, String(CURRENT_SEED_VERSION));
+      console.log('[browser-shim] Updated welcome.md to seed version', CURRENT_SEED_VERSION);
+      return;
+    }
+
     const now = Date.now();
     const entries = [
       { path: SANDBOX_ROOT, parent: '/', content: null, isDir: true, created: now, modified: now },
@@ -257,7 +314,8 @@ collaboration, and cloud persistence.
       await fsPut(entry);
     }
 
-    console.log('[browser-shim] Seeded default sandbox project');
+    localStorage.setItem(SEED_VERSION_KEY, String(CURRENT_SEED_VERSION));
+    console.log('[browser-shim] Seeded default sandbox project (v' + CURRENT_SEED_VERSION + ')');
   }
 
   // ========================================================================
