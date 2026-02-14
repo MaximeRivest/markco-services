@@ -1,6 +1,6 @@
 # markco.dev — Quick Explain
 
-`markco-services` is the cloud/platform control plane around MRMD.
+`markco-services` is the cloud/platform control plane for MarkCo.
 
 It runs five services:
 - orchestrator (`:3000`)
