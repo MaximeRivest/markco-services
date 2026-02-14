@@ -22,6 +22,149 @@ const EDITOR_IMAGE = process.env.EDITOR_IMAGE || 'localhost/mrmd-editor:latest';
 /** In-memory map: userId → { editorPort, editorContainer, runtimePort, runtimeId, ... } */
 const activeEditors = new Map();
 
+function toLinuxUsername(value, fallback = 'user') {
+  const raw = String(value || '').trim().toLowerCase();
+  const cleaned = raw
+    .replace(/[^a-z0-9._-]/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^[._-]+|[._-]+$/g, '');
+
+  let username = cleaned || fallback;
+  if (!/^[a-z_]/.test(username)) {
+    username = `u_${username}`;
+  }
+  return username.slice(0, 32);
+}
+
+function deriveLinuxUsername(user = {}) {
+  return toLinuxUsername(
+    user.username
+      || (user.email ? user.email.split('@')[0] : '')
+      || user.name
+      || user.id,
+    'user',
+  );
+}
+
+function writeIfMissing(filePath, content) {
+  if (existsSync(filePath)) return;
+  writeFileSync(filePath, content, 'utf8');
+}
+
+function ensureUserWorkspace(userId, user = {}) {
+  const userDir = `${DATA_DIR}/${userId}`;
+  const projectsDir = `${userDir}/Projects`;
+  const scratchDir = `${projectsDir}/Scratch`;
+  const tutorialDir = `${projectsDir}/Tutorial`;
+  const assetsDir = `${scratchDir}/_assets`;
+
+  mkdirSync(userDir, { recursive: true });
+  mkdirSync(projectsDir, { recursive: true });
+  mkdirSync(scratchDir, { recursive: true });
+  mkdirSync(tutorialDir, { recursive: true });
+  mkdirSync(assetsDir, { recursive: true });
+
+  // Keep backward compatibility with older paths expecting lowercase "projects"
+  const lowerProjectsDir = `${userDir}/projects`;
+  if (!existsSync(lowerProjectsDir)) {
+    try {
+      symlinkSync('Projects', lowerProjectsDir, 'dir');
+    } catch {
+      // Filesystem may not permit symlink; fallback to real dir.
+      mkdirSync(lowerProjectsDir, { recursive: true });
+    }
+  }
+
+  const displayName = user.name || user.username || user.email || 'there';
+
+  writeIfMissing(`${scratchDir}/mrmd.md`, `# Scratch
+
+This is your temporary workspace.
+Use it for quick notes, tests, and throwaway experiments.
+
+\`\`\`yaml config
+name: "Scratch"
+session:
+  python:
+    venv: ".venv"
+    cwd: "."
+    name: "default"
+    auto_start: true
+\`\`\`
+`);
+
+  writeIfMissing(`${scratchDir}/01-scratchpad.md`, `# Scratchpad
+
+Welcome, ${displayName}.
+
+Use this notebook for quick experiments.
+
+\`\`\`python
+print("Scratch space ready")
+\`\`\`
+`);
+
+  writeIfMissing(`${assetsDir}/.gitkeep`, '');
+
+  writeIfMissing(`${tutorialDir}/mrmd.md`, `# Tutorial
+
+\`\`\`yaml config
+name: "Tutorial"
+session:
+  python:
+    venv: ".venv"
+    cwd: "."
+    name: "default"
+    auto_start: true
+\`\`\`
+`);
+
+  writeIfMissing(`${tutorialDir}/01-welcome.md`, `# Welcome to Feuille
+
+This project teaches the platform basics.
+
+- Use **Ctrl+P** to open/create files
+- Use **Ctrl+Enter** to run the current code cell
+- Use **Shift+Enter** to run and move to next cell
+`);
+
+  writeIfMissing(`${tutorialDir}/02-editor-basics.md`, `# Editor Basics
+
+## Markdown
+Write normal markdown text.
+
+## Code cells
+\`\`\`python
+x = 21 * 2
+x
+\`\`\`
+
+Run the cell and output appears inline.
+`);
+
+  writeIfMissing(`${tutorialDir}/03-runtimes.md`, `# Runtimes
+
+You can run multiple languages.
+
+\`\`\`bash
+echo "hello from bash"
+\`\`\`
+
+\`\`\`python
+import platform
+platform.python_version()
+\`\`\`
+`);
+
+  writeIfMissing(`${tutorialDir}/04-collaboration.md`, `# Collaboration
+
+This editor is collaborative.
+Open the same document in another tab and watch live sync.
+`);
+
+  return { userDir, projectsDir, scratchDir, tutorialDir };
+}
+
 /**
  * Find a free port on the host.
  */
@@ -53,11 +196,12 @@ async function waitForHealth(port, path = '/health', timeoutMs = 30000) {
 async function startEditorContainer(userId, editorPort, runtimePort, user = {}) {
   const containerName = `editor-${userId.slice(0, 8)}`;
   const userDir = `${DATA_DIR}/${userId}`;
+  const linuxUsername = deriveLinuxUsername(user);
 
   // Ensure user data directory exists with correct ownership for container's node user (uid 1000)
   mkdirSync(userDir, { recursive: true });
   try {
-    await execFile('sudo', ['chown', '1000:1000', userDir], { timeout: 5000 });
+    await execFile('sudo', ['chown', '-R', '1000:1000', userDir], { timeout: 12000 });
   } catch { /* best effort — may already be correct */ }
 
   // Remove stale container with same name if it exists
@@ -71,13 +215,17 @@ async function startEditorContainer(userId, editorPort, runtimePort, user = {}) 
     '--name', containerName,
     '--network=host',
     '--memory=512m',
-    '-v', `${userDir}:/home/node`,
+    '-v', `${userDir}:/home/user`,
+    '-e', `HOME=/home/user`,
+    '-e', `USER=${linuxUsername}`,
+    '-e', `LOGNAME=${linuxUsername}`,
     '-e', `CLOUD_MODE=1`,
     '-e', `RUNTIME_PORT=${runtimePort}`,
     '-e', `PORT=${editorPort}`,
     '-e', `BASE_PATH=/u/${userId}/`,
     '-e', `CLOUD_USER_ID=${userId}`,
     '-e', `CLOUD_USER_NAME=${user.name || ''}`,
+    '-e', `CLOUD_USER_USERNAME=${user.username || ''}`,
     '-e', `CLOUD_USER_EMAIL=${user.email || ''}`,
     '-e', `CLOUD_USER_AVATAR=${user.avatar_url || ''}`,
     '-e', `CLOUD_USER_PLAN=${user.plan || 'free'}`,
@@ -86,7 +234,7 @@ async function startEditorContainer(userId, editorPort, runtimePort, user = {}) 
     '--port', String(editorPort),
     '--host', '0.0.0.0',
     '--no-auth',
-    '/home/node',
+    '/home/user',
   ];
 
   const { stdout } = await execFile('sudo', args, { timeout: 30000 });
@@ -134,6 +282,9 @@ export async function onUserLogin(user) {
 
   startingUsers.add(userId);
   try {
+  // 0. Ensure per-user workspace scaffold exists
+  ensureUserWorkspace(userId, user);
+
   // 1. Start runtime container via compute-manager
   const runtime = await computeManager.startRuntime(userId, user.plan || 'free');
   console.log(`[lifecycle] Runtime started for ${userId}: port ${runtime.port}`);

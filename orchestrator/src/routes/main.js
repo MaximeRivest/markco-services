@@ -145,7 +145,13 @@ router.get('/dashboard', requireAuth, async (req, res) => {
 </html>`);
   } else {
     res.json({
-      user: { id: user.id, email: user.email, name: user.name, plan: user.plan },
+      user: {
+        id: user.id,
+        email: user.email,
+        username: user.username,
+        name: user.name,
+        plan: user.plan,
+      },
       editor: editor ? { host: editor.host, editorPort: editor.editorPort, runtimePort: editor.runtimePort } : null,
     });
   }
@@ -174,14 +180,14 @@ router.post('/projects/import', requireAuth, async (req, res) => {
   const userId = req.user.id;
   const projectName = name || repo_url.split('/').pop().replace('.git', '');
   const dataDir = process.env.DATA_DIR || '/data/users';
-  const projectDir = `${dataDir}/${userId}/projects/${projectName}`;
+  const projectDir = `${dataDir}/${userId}/Projects/${projectName}`;
 
   try {
     const { execFile } = await import('node:child_process');
     const { promisify } = await import('node:util');
     const exec = promisify(execFile);
 
-    await exec('mkdir', ['-p', `${dataDir}/${userId}/projects`]);
+    await exec('mkdir', ['-p', `${dataDir}/${userId}/Projects`]);
     await exec('git', ['clone', '--depth', '1', repo_url, projectDir], { timeout: 60000 });
 
     res.status(201).json({
