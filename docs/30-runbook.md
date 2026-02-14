@@ -19,6 +19,13 @@ systemctl status postgresql
 
 ## 2) API-level health checks
 
+Quick automated pass:
+
+```bash
+BASE_URL=http://localhost feuille-services/scripts/smoke.sh
+```
+
+
 - orchestrator health: `GET /api/health`
 - service detail: `GET /api/services`
 - direct service health:

@@ -8,10 +8,16 @@ This folder is the canonical documentation for the **feuille.dev platform layer*
 ## Start here
 
 1. [00-quick-explain.md](./00-quick-explain.md)
-2. [10-architecture-overview.md](./10-architecture-overview.md)
-3. [20-production-instance.md](./20-production-instance.md)
-4. [30-runbook.md](./30-runbook.md)
-5. [40-api-contracts.md](./40-api-contracts.md)
+2. [05-goals-and-non-goals.md](./05-goals-and-non-goals.md)
+3. [10-architecture-overview.md](./10-architecture-overview.md)
+4. [20-production-instance.md](./20-production-instance.md)
+5. [30-runbook.md](./30-runbook.md)
+6. [40-api-contracts.md](./40-api-contracts.md)
+7. [50-env-contract.md](./50-env-contract.md)
+
+## Scripts
+
+- smoke test: `../scripts/smoke.sh`
 
 ## Legacy source
 
