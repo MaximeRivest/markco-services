@@ -1,0 +1,19 @@
+{
+  "name": "@feuille/compute-manager",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "node --test test/*.test.js",
+    "db:init": "psql $DATABASE_URL -f src/schema.sql"
+  },
+  "dependencies": {
+    "@aws-sdk/client-ec2": "^3.700.0",
+    "express": "^4.21.0",
+    "pg": "^8.13.0"
+  },
+  "devDependencies": {}
+}

@@ -1,0 +1,14 @@
+{
+  "name": "@feuille/publish-service",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test test/fsml.test.js test/nav-tree.test.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "mime-types": "^2.1.35"
+  },
+  "devDependencies": {}
+}
