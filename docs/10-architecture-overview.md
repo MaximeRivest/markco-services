@@ -1,6 +1,6 @@
-# feuille.dev Architecture Overview
+# markco.dev Architecture Overview
 
-This is the canonical architecture summary for the platform layer currently staged in `feuille-services/`.
+This is the canonical architecture summary for the platform layer currently staged in `markco-services/`.
 
 ## Services and ports
 

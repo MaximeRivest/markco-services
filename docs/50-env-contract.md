@@ -1,12 +1,12 @@
 # Environment Contract
 
-Canonical environment-variable reference for `feuille-services` platform components.
+Canonical environment-variable reference for `markco-services` platform components.
 
 ## 1) Orchestrator (`orchestrator`)
 
 ### Core
 - `PORT` (default: `3000`)
-- `DOMAIN` (default: `feuille.dev`)
+- `DOMAIN` (default: `markco.dev`)
 
 ### OAuth/UI routing
 - `GITHUB_CLIENT_ID` (required for `/login` flow)
@@ -25,14 +25,14 @@ Canonical environment-variable reference for `feuille-services` platform compone
 ## 2) Auth service (`auth-service`)
 
 - `PORT` (default: `3001`)
-- `DATABASE_URL` (default: `postgresql://localhost:5432/feuille`)
+- `DATABASE_URL` (default: `postgresql://localhost:5432/markco`)
 - `GITHUB_CLIENT_ID` (required for GitHub auth)
 - `GITHUB_CLIENT_SECRET` (required for GitHub auth)
 
 ## 3) Compute manager (`compute-manager`)
 
 - `PORT` (default: `3002`)
-- `DATABASE_URL` (default: `postgresql://localhost:5432/feuille`)
+- `DATABASE_URL` (default: `postgresql://localhost:5432/markco`)
 
 ### AWS/EC2 migration path
 - `AWS_REGION` (default: `ca-central-1`)

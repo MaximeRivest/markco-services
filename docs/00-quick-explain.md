@@ -1,6 +1,6 @@
-# feuille.dev — Quick Explain
+# markco.dev — Quick Explain
 
-`feuille-services` is the cloud/platform control plane around MRMD.
+`markco-services` is the cloud/platform control plane for MarkCo.
 
 It runs five services:
 - orchestrator (`:3000`)

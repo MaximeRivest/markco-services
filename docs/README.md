@@ -1,9 +1,9 @@
-# feuille.dev Platform Docs (staged)
+# markco.dev Platform Docs (staged)
 
-This folder is the canonical documentation for the **feuille.dev platform layer**.
+This folder is the canonical documentation for the **markco.dev platform layer**.
 
-> Current status: staged inside `mrmd-packages/feuille-services`.
-> Planned destination: dedicated `feuille.dev` repository.
+> Current status: staged inside `mrmd-packages/markco-services`.
+> Planned destination: dedicated `markco.dev` repository.
 
 ## Start here
 

@@ -1,11 +1,11 @@
-# Cross-Device Vision: MRMD Everywhere
+# Cross-Device Vision: MarkCo Everywhere
 
 > Written: 2026-02-14
 > Status: Design exploration — not committed to any timeline
 
 ## The Promise
 
-You open MRMD on your laptop and work on a data analysis. You leave for lunch. On the bus, you pull out your phone, open the same notebook, tweak a parameter, hit Run — it executes on your laptop's GPU back at the office. You see the result on your phone over LTE. That evening on your home laptop, you open MRMD and everything is there: your documents, your outputs, your running Python session with all its loaded dataframes. You never thought about syncing. You never lost anything.
+You open MarkCo on your laptop and work on a data analysis. You leave for lunch. On the bus, you pull out your phone, open the same notebook, tweak a parameter, hit Run — it executes on your laptop's GPU back at the office. You see the result on your phone over LTE. That evening on your home laptop, you open MarkCo and everything is there: your documents, your outputs, your running Python session with all its loaded dataframes. You never thought about syncing. You never lost anything.
 
 ## Why Our Architecture Already Points Here
 
@@ -72,7 +72,7 @@ Phone hits "Run" on a Python cell
 **How the desktop registers itself:**
 
 ```
-Desktop MRMD starts
+Desktop MarkCo starts
   → starts local Python, R, Julia, Bash as usual
   → opens persistent WebSocket to cloud orchestrator
   → registers: "I'm user X, I have Python on :8000, R on :8001,
@@ -102,7 +102,7 @@ The WebSocket tunnel is simplest and works everywhere. Latency adds maybe 50-100
 **Monday evening, laptop at home:**
 - Desktop at office went to sleep
 - Orchestrator CRIU-checkpointed the Python session automatically
-- Open MRMD on home laptop → orchestrator restores the checkpoint on cloud compute
+- Open MarkCo on home laptop → orchestrator restores the checkpoint on cloud compute
 - **Entire Python session state is there** — the dataframes, the models, everything
 - Continue exactly where you left off
 
@@ -134,12 +134,12 @@ Don't make a full code editor on a phone. Touch keyboards and code don't mix. In
 - That's what your desktop is for
 - Phone is for reading, reviewing, tweaking, monitoring
 
-**Implementation path:** Start as a PWA at `feuille.dev/m/` (not a native app). Validates the UX with zero App Store friction. Wrap in Capacitor later for push notifications and offline.
+**Implementation path:** Start as a PWA at `markco.dev/m/` (not a native app). Validates the UX with zero App Store friction. Wrap in Capacitor later for push notifications and offline.
 
 ## Delightful Experiences That Fall Out of This
 
 ### "Borrow a runtime"
-You're on your phone, need to run something heavy. Your desktop is on at home. MRMD routes execution there automatically. If desktop is off, falls back to cloud. You never choose — it just picks the best option.
+You're on your phone, need to run something heavy. Your desktop is on at home. MarkCo routes execution there automatically. If desktop is off, falls back to cloud. You never choose — it just picks the best option.
 
 ### "Session handoff"
 Like Apple Handoff but for compute. Phone shows a subtle banner: "Continue on MacBook?" Tap it, MacBook opens with the document at exactly where you were scrolling on your phone.
@@ -160,14 +160,14 @@ Right-click a cell → "Run on phone" (test mobile rendering), "Run on cloud GPU
 | **Now** | Data persistence, account UI, basic cloud editor | Foundation — nothing works without this |
 | **Next** | Cloud Yjs relay with persistent storage | Gives you cloud backup for free. Documents survive container restarts. |
 | **Then** | Electron ↔ cloud sync | Desktop app connects to cloud relay on startup. Files sync in background. This is the "never lose work" moment. |
-| **Then** | Phone PWA (`feuille.dev/m/`) | Read/tweak/run experience. Uses same Yjs relay. Validates cross-device without native app investment. |
+| **Then** | Phone PWA (`markco.dev/m/`) | Read/tweak/run experience. Uses same Yjs relay. Validates cross-device without native app investment. |
 | **Then** | Desktop runtime registration | Desktop tells orchestrator "I have runtimes." Orchestrator can route phone/cloud requests to them. |
 | **Later** | Native phone app | Capacitor wrap for push notifications, offline, app icon. |
 | **Later** | CRIU session roaming | Runtime follows you across devices automatically. |
 
 ## What Makes This Different From Competitors
 
-| Product | Strength | Gap MRMD fills |
+| Product | Strength | Gap MarkCo fills |
 |---------|----------|----------------|
 | Jupyter | Ubiquitous | No sync, no offline, no cross-device, no CRDT |
 | Observable | Beautiful cloud notebooks | Cloud-only, no local runtimes, no desktop app |
@@ -175,4 +175,4 @@ Right-click a cell → "Run on phone" (test mobile rendering), "Run on cloud GPU
 | VS Code Remote | Great remote dev | Not notebook-first, no phone story |
 | Google Colab | Easy GPU access | Cloud-only, no local-first, clunky UX |
 
-MRMD sits at the intersection: **local-first, cloud-synced, multi-runtime, multi-device notebooks.** Nobody else is doing this.
+MarkCo sits at the intersection: **local-first, cloud-synced, multi-runtime, multi-device notebooks.** Nobody else is doing this.

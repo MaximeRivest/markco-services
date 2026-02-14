@@ -5,7 +5,7 @@ Last synced from operational notes: **2026-02-09 STATUS snapshot**.
 ## Host baseline
 
 - Cloud: AWS EC2
-- Instance: `feuille-base`
+- Instance: `markco-base`
 - Instance ID: `i-04210339d6c067c47`
 - Type: `t3.large` (2 vCPU, 8 GB RAM)
 - Region/AZ: `ca-central-1b`
@@ -17,7 +17,7 @@ Last synced from operational notes: **2026-02-09 STATUS snapshot**.
 ## Service topology on host
 
 - Caddy: systemd `caddy.service`
-- Platform stack: systemd `feuille.service`
+- Platform stack: systemd `markco.service`
   - orchestrator `:3000`
   - auth-service `:3001`
   - compute-manager `:3002`
@@ -40,10 +40,10 @@ Per user:
 
 ## Data and filesystem locations
 
-- service code: `/opt/feuille/feuille-services/`
-- editor image build context: `/opt/feuille/editor-build/`
-- runtime Dockerfile: `/opt/feuille/Dockerfile.runtime`
-- static publish assets: `/opt/feuille/static/`
+- service code: `/opt/markco/markco-services/`
+- editor image build context: `/opt/markco/editor-build/`
+- runtime Dockerfile: `/opt/markco/Dockerfile.runtime`
+- static publish assets: `/opt/markco/static/`
 - user data roots: `/data/users/<userId>/`
 
 ## Current known issues (from status snapshot)

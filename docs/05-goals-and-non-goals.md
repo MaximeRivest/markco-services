@@ -1,12 +1,12 @@
 # Goals and Non-Goals
 
-This document captures current project intent for the platform and MRMD ecosystem direction.
+This document captures current project intent for the platform and MarkCo ecosystem direction.
 
 ## Vision (founder statement)
 
 > I think a team of one can now create a software masterpiece as a hobby on nights and weekends.
 >
-> I have often told myself I should stop adding features to MRMD and just ship. I decided to stop thinking like that.
+> I have often told myself I should stop adding features to MarkCo and just ship. I decided to stop thinking like that.
 >
 > I want to build a masterpiece.
 >
