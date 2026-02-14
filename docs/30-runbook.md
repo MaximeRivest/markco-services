@@ -71,15 +71,32 @@ tail -f /tmp/build.log
 sudo podman build -t mrmd-runtime:latest -f /opt/markco/Dockerfile.runtime /tmp/
 ```
 
-### Deploy orchestrator code changes
+### Deploy code changes
+
+Use the deploy script (auto-detects changed files, deploys, restarts if needed, runs smoke tests):
 
 ```bash
-# copy changed files
-scp -i ~/.ssh/markco-key.pem markco-services/orchestrator/src/*.js ubuntu@<host>:/tmp/
+./scripts/deploy.sh            # Deploy only changed files
+./scripts/deploy.sh --static   # Static assets only (no restart)
+./scripts/deploy.sh --services # Service code only (restarts markco)
+./scripts/deploy.sh --all      # Force deploy everything
+./scripts/deploy.sh --dry-run  # Preview what would change
+```
 
-# apply + restart
-ssh -i ~/.ssh/markco-key.pem ubuntu@<host> '
-  sudo cp /tmp/*.js /opt/markco/markco-services/orchestrator/src/
+The script compares local file hashes against the server to detect changes.
+Static files (browser-shim.js, runtime scripts) don't require a restart.
+Service files (orchestrator, auth, etc.) trigger `systemctl restart markco`.
+
+> SSH key: `~/.ssh/feuille-key.pem` (override with `MARKCO_SSH_KEY` env var).
+> Host: resolved from `dig +short markco.dev` (override with `MARKCO_HOST` env var).
+
+#### Manual deploy (single file)
+
+```bash
+HOST=$(dig +short markco.dev)
+scp -i ~/.ssh/feuille-key.pem orchestrator/src/routes/main.js ubuntu@$HOST:/tmp/
+ssh -i ~/.ssh/feuille-key.pem ubuntu@$HOST '
+  sudo cp /tmp/main.js /opt/markco/markco-services/orchestrator/src/routes/main.js
   sudo systemctl restart markco
 '
 ```
