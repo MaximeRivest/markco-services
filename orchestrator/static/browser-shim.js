@@ -227,7 +227,23 @@ collaboration, and cloud persistence.
 
   async function seedDefaultProject() {
     const root = await fsGet(SANDBOX_ROOT);
-    if (root) return; // Already seeded
+    if (root) {
+      // Already seeded — but ensure welcome.md exists (might have been deleted)
+      const welcome = await fsGet(SANDBOX_ROOT + '/welcome.md');
+      if (!welcome) {
+        const now = Date.now();
+        await fsPut({
+          path: SANDBOX_ROOT + '/welcome.md',
+          parent: SANDBOX_ROOT,
+          content: DEFAULT_WELCOME_DOC,
+          isDir: false,
+          created: now,
+          modified: now,
+        });
+        console.log('[browser-shim] Re-seeded welcome.md');
+      }
+      return;
+    }
 
     const now = Date.now();
     const entries = [
@@ -388,37 +404,135 @@ collaboration, and cloud persistence.
   // ========================================================================
 
   /**
+   * Title from filename: remove extension, numeric prefix, replace separators.
+   * Matches mrmd-project/src/fsml.js titleFromFilename().
+   */
+  function titleFromFilename(filename) {
+    if (!filename) return '';
+    let name = filename.replace(/\.[^.]+$/, '');       // remove extension
+    name = name.replace(/^\d+-/, '');                    // remove numeric prefix (01-)
+    name = name.replace(/[-_]/g, ' ');                   // replace hyphens/underscores
+    name = name.split(' ')
+      .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+      .join(' ');
+    return name;
+  }
+
+  function isIndexFile(filename) {
+    const lower = filename.toLowerCase();
+    return lower === 'index.md' || lower === 'readme.md' || lower === 'index.qmd';
+  }
+
+  /**
    * Build a nav tree from IndexedDB entries matching a project root.
-   * Returns the same shape as the server's project.nav() response.
+   * Returns the same shape as mrmd-project FSML.buildNavTree():
+   *   [{ path, title, order, isFolder, hasIndex, children }]
    */
   async function buildNavTree(projectRoot) {
     const entries = await fsListPrefix(projectRoot + '/');
-    const files = entries
-      .filter(e => !e.isDir && e.path.toLowerCase().endsWith('.md'))
-      .map(e => e.path);
+    const mdFiles = entries
+      .filter(e => !e.isDir && (e.path.toLowerCase().endsWith('.md') || e.path.toLowerCase().endsWith('.qmd')))
+      .map(e => e.path.slice(projectRoot.length + 1)) // relative paths
+      .filter(rel => {
+        // Skip hidden dirs/files and mrmd.md
+        if (rel === 'mrmd.md') return false;
+        return !rel.split('/').some(part => part.startsWith('.') || part.startsWith('_'));
+      })
+      .sort();
 
-    files.sort();
+    // Build folder map
+    const folders = new Map();
+    const rootChildren = [];
 
-    // Build flat nav items
-    const navItems = [];
-    for (const filePath of files) {
-      const relative = filePath.slice(projectRoot.length + 1);
-      const parts = relative.split('/');
-      const name = parts.pop().replace(/\.md$/i, '');
+    // First pass: identify folders, mark hasIndex
+    for (const relPath of mdFiles) {
+      const segments = relPath.split('/');
 
-      // Skip mrmd.md config file
-      if (parts.length === 0 && name === 'mrmd') continue;
-      // Skip hidden dirs
-      if (parts.some(p => p.startsWith('.'))) continue;
+      for (let i = 0; i < segments.length - 1; i++) {
+        const folderPath = segments.slice(0, i + 1).join('/');
+        if (!folders.has(folderPath)) {
+          const folderName = segments[i];
+          const orderMatch = folderName.match(/^(\d+)-/);
+          folders.set(folderPath, {
+            path: folderPath,
+            title: titleFromFilename(folderName),
+            order: orderMatch ? parseInt(orderMatch[1], 10) : null,
+            isFolder: true,
+            hasIndex: false,
+            children: [],
+          });
+        }
+      }
 
-      navItems.push({
-        path: relative,
-        name,
-        folder: parts.length > 0 ? parts.join('/') : null,
-      });
+      // Check if this is an index file
+      const filename = segments[segments.length - 1];
+      if (isIndexFile(filename) && segments.length > 1) {
+        const parentPath = segments.slice(0, -1).join('/');
+        if (folders.has(parentPath)) {
+          folders.get(parentPath).hasIndex = true;
+        }
+      }
     }
 
-    return navItems;
+    // Second pass: build file nodes
+    for (const relPath of mdFiles) {
+      const segments = relPath.split('/');
+      const filename = segments[segments.length - 1];
+
+      // Skip index files (represented by folder itself)
+      if (isIndexFile(filename)) continue;
+
+      const orderMatch = filename.match(/^(\d+)-/);
+      const node = {
+        path: relPath,
+        title: titleFromFilename(filename),
+        order: orderMatch ? parseInt(orderMatch[1], 10) : null,
+        isFolder: false,
+        hasIndex: false,
+        children: [],
+      };
+
+      if (segments.length === 1) {
+        rootChildren.push(node);
+      } else {
+        const parentPath = segments.slice(0, -1).join('/');
+        if (folders.has(parentPath)) {
+          folders.get(parentPath).children.push(node);
+        }
+      }
+    }
+
+    // Third pass: add folders to tree
+    const folderList = Array.from(folders.values());
+    folderList.sort((a, b) => a.path.split('/').length - b.path.split('/').length);
+
+    for (const folder of folderList) {
+      const segments = folder.path.split('/');
+      if (segments.length === 1) {
+        rootChildren.push(folder);
+      } else {
+        const parentPath = segments.slice(0, -1).join('/');
+        if (folders.has(parentPath)) {
+          folders.get(parentPath).children.push(folder);
+        }
+      }
+    }
+
+    // Sort: by order if present, else alphabetical
+    const sortNodes = (arr) => {
+      arr.sort((a, b) => {
+        if (a.order !== null && b.order !== null) return a.order - b.order;
+        if (a.order !== null) return -1;
+        if (b.order !== null) return 1;
+        return a.title.localeCompare(b.title);
+      });
+      for (const item of arr) {
+        if (item.children?.length > 0) sortNodes(item.children);
+      }
+    };
+    sortNodes(rootChildren);
+
+    return rootChildren;
   }
 
   // ========================================================================

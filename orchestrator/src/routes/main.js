@@ -96,16 +96,19 @@ async function requireAuth(req, res, next) {
   }
 }
 
-function renderPage(title, body) {
+function renderPage(title, body, { landing = false } = {}) {
   return `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>${title}</title>
+  <meta name="color-scheme" content="dark light" />
   <style>
+    /* ── Dark (default / midnight) ─────────────────────────── */
     :root {
       --bg: #1e1e1e;
+      --bg-subtle: #252526;
       --card: #252526;
       --card-elevated: #2d2d2d;
       --muted: #888888;
@@ -113,41 +116,66 @@ function renderPage(title, body) {
       --text-bright: #e0e0e0;
       --accent: #6495ed;
       --accent-hover: #7ba6f7;
-      --accent-strong: #4a7bd4;
+      --accent-muted: rgba(100, 149, 237, 0.12);
       --success: #4caf50;
       --error: #f44336;
       --border: #3c3c3c;
-      --border-subtle: rgba(255, 255, 255, 0.1);
+      --border-subtle: rgba(255, 255, 255, 0.08);
+      --shadow: 0 8px 32px rgba(0,0,0,.4);
+      --code-bg: rgba(255, 255, 255, 0.06);
+      --hover-bg: rgba(255, 255, 255, 0.05);
+      --syntax-keyword: #569cd6;
+      --syntax-string: #ce9178;
+      --syntax-comment: #6a9955;
+      --syntax-function: #dcdcaa;
+      --syntax-number: #b5cea8;
+      --syntax-property: #9cdcfe;
+      --syntax-punctuation: #808080;
     }
-    * { box-sizing: border-box; }
+
+    /* ── Light (daylight) ──────────────────────────────────── */
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #ffffff;
+        --bg-subtle: #fafafa;
+        --card: #ffffff;
+        --card-elevated: #fafafa;
+        --muted: #78909c;
+        --text: #37474f;
+        --text-bright: #000000;
+        --accent: #1976d2;
+        --accent-hover: #1565c0;
+        --accent-muted: rgba(25, 118, 210, 0.08);
+        --success: #388e3c;
+        --error: #d32f2f;
+        --border: #e0e0e0;
+        --border-subtle: rgba(0, 0, 0, 0.06);
+        --shadow: 0 2px 8px rgba(0,0,0,.08);
+        --code-bg: #f5f5f5;
+        --hover-bg: rgba(0, 0, 0, 0.03);
+        --syntax-keyword: #0d47a1;
+        --syntax-string: #2e7d32;
+        --syntax-comment: #757575;
+        --syntax-function: #6a1b9a;
+        --syntax-number: #e65100;
+        --syntax-property: #0d47a1;
+        --syntax-punctuation: #90a4ae;
+      }
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
     body {
-      margin: 0;
       min-height: 100vh;
       font-family: Literata, Charter, Georgia, serif;
       background: var(--bg);
       color: var(--text);
-      display: grid;
-      place-items: center;
-      padding: 24px;
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
     }
-    .card {
-      width: min(560px, 100%);
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 32px;
-      box-shadow: 0 8px 32px rgba(0,0,0,.4);
-    }
-    h1 {
-      margin: 0 0 8px;
-      font-size: 28px;
-      line-height: 1.2;
-      color: var(--text-bright);
-      font-weight: 600;
-    }
-    p { margin: 0; color: var(--muted); line-height: 1.5; }
-    .stack { display: grid; gap: 10px; margin-top: 24px; }
-    .row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 18px; }
+
+    /* ── Shared components ──────────────────────────────────── */
+
     .btn {
       display: inline-flex;
       align-items: center;
@@ -165,7 +193,7 @@ function renderPage(title, body) {
       cursor: pointer;
       transition: background .15s ease, border-color .15s ease;
     }
-    .btn:hover { background: #383838; border-color: #505050; }
+    .btn:hover { background: var(--hover-bg); border-color: var(--muted); }
     .btn.primary {
       background: var(--accent);
       border-color: var(--accent);
@@ -180,49 +208,255 @@ function renderPage(title, body) {
       border-color: var(--border);
     }
     .btn.ghost:hover {
-      background: rgba(255, 255, 255, 0.05);
-      border-color: #505050;
+      background: var(--hover-bg);
     }
     .btn.disabled {
       opacity: .45;
       pointer-events: none;
       cursor: not-allowed;
     }
-    .flash {
-      margin-top: 16px;
-      border: 1px solid #2e7d32;
-      background: rgba(76, 175, 80, 0.1);
-      color: #81c784;
-      border-radius: 6px;
-      padding: 10px 12px;
-      font-size: 14px;
-    }
-    .meta {
-      margin-top: 20px;
-      padding-top: 16px;
-      border-top: 1px solid var(--border);
-      font-size: 13px;
-      color: var(--muted);
-    }
+
     code {
       font-family: 'SF Mono', Monaco, Consolas, monospace;
-      background: rgba(255, 255, 255, 0.06);
+      background: var(--code-bg);
       padding: 2px 6px;
       border-radius: 3px;
-      font-size: 0.9em;
+      font-size: 0.85em;
     }
+
     .pill {
       display: inline-flex;
       align-items: center;
       font-family: 'SF Mono', Monaco, Consolas, monospace;
-      border: 1px solid #2e7d32;
-      background: rgba(76, 175, 80, 0.08);
+      border: 1px solid;
+      border-color: color-mix(in srgb, var(--success) 40%, transparent);
+      background: color-mix(in srgb, var(--success) 8%, transparent);
       color: var(--success);
       font-size: 11px;
       border-radius: 999px;
       padding: 3px 8px;
       margin-left: 8px;
     }
+
+    .flash {
+      border: 1px solid color-mix(in srgb, var(--success) 40%, transparent);
+      background: color-mix(in srgb, var(--success) 8%, transparent);
+      color: var(--success);
+      border-radius: 6px;
+      padding: 10px 14px;
+      font-size: 14px;
+    }
+
+    .flash.error {
+      border-color: color-mix(in srgb, var(--error) 40%, transparent);
+      background: color-mix(in srgb, var(--error) 8%, transparent);
+      color: var(--error);
+    }
+
+    /* ── Card pages (login, dashboard) ──────────────────────── */
+
+    .page-card {
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+    }
+    .page-card .card {
+      width: min(560px, 100%);
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 32px;
+      box-shadow: var(--shadow);
+    }
+    .page-card h1 {
+      font-size: 28px;
+      line-height: 1.2;
+      color: var(--text-bright);
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+    .page-card p { color: var(--muted); }
+    .page-card .stack { display: grid; gap: 10px; margin-top: 24px; }
+    .page-card .row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 18px; }
+    .page-card .meta {
+      margin-top: 20px;
+      padding-top: 16px;
+      border-top: 1px solid var(--border);
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    ${landing ? `
+    /* ── Landing page ────────────────────────────────────────── */
+
+    .landing-nav {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      background: color-mix(in srgb, var(--bg) 85%, transparent);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border-subtle);
+      padding: 0 24px;
+    }
+    .landing-nav-inner {
+      max-width: 960px;
+      margin: 0 auto;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 56px;
+    }
+    .landing-logo {
+      font-weight: 700;
+      font-size: 17px;
+      color: var(--text-bright);
+      text-decoration: none;
+    }
+    .landing-nav-links {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+    .landing-nav-links a {
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 14px;
+      padding: 6px 12px;
+      border-radius: 6px;
+      transition: color .15s;
+    }
+    .landing-nav-links a:hover { color: var(--text-bright); }
+
+    .landing-hero {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 80px 24px 60px;
+      text-align: center;
+    }
+    .landing-hero h1 {
+      font-size: clamp(32px, 5vw, 48px);
+      font-weight: 700;
+      line-height: 1.15;
+      color: var(--text-bright);
+      margin-bottom: 20px;
+      letter-spacing: -0.02em;
+    }
+    .landing-hero .subtitle {
+      font-size: clamp(16px, 2.5vw, 19px);
+      color: var(--muted);
+      max-width: 600px;
+      margin: 0 auto 36px;
+      line-height: 1.6;
+    }
+    .landing-hero .cta-row {
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+    .landing-hero .btn { padding: 12px 24px; font-size: 15px; }
+
+    .landing-section {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 60px 24px;
+    }
+    .landing-section + .landing-section {
+      border-top: 1px solid var(--border-subtle);
+    }
+    .landing-section h2 {
+      font-size: 24px;
+      font-weight: 600;
+      color: var(--text-bright);
+      margin-bottom: 12px;
+    }
+    .landing-section p {
+      color: var(--muted);
+      max-width: 640px;
+      margin-bottom: 28px;
+    }
+
+    .feature-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 20px;
+    }
+    .feature-item {
+      background: var(--bg-subtle);
+      border: 1px solid var(--border-subtle);
+      border-radius: 8px;
+      padding: 24px;
+    }
+    .feature-item h3 {
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--text-bright);
+      margin-bottom: 8px;
+    }
+    .feature-item p {
+      font-size: 14px;
+      color: var(--muted);
+      margin: 0;
+      line-height: 1.55;
+    }
+
+    .code-preview {
+      background: var(--bg-subtle);
+      border: 1px solid var(--border-subtle);
+      border-radius: 8px;
+      padding: 20px 24px;
+      font-family: 'SF Mono', Monaco, Consolas, monospace;
+      font-size: 13px;
+      line-height: 1.65;
+      overflow-x: auto;
+      max-width: 640px;
+    }
+    .code-preview .kw { color: var(--syntax-keyword); }
+    .code-preview .str { color: var(--syntax-string); }
+    .code-preview .cm { color: var(--syntax-comment); font-style: italic; }
+    .code-preview .fn { color: var(--syntax-function); }
+    .code-preview .num { color: var(--syntax-number); }
+    .code-preview .prop { color: var(--syntax-property); }
+    .code-preview .punc { color: var(--syntax-punctuation); }
+    .code-preview .out {
+      display: block;
+      margin-top: 8px;
+      padding-top: 8px;
+      border-top: 1px solid var(--border-subtle);
+      color: var(--muted);
+    }
+
+    .lang-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 16px;
+    }
+    .lang-tag {
+      font-family: 'SF Mono', Monaco, Consolas, monospace;
+      font-size: 12px;
+      padding: 4px 10px;
+      border-radius: 4px;
+      background: var(--accent-muted);
+      color: var(--accent);
+      border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
+    }
+
+    .landing-footer {
+      border-top: 1px solid var(--border-subtle);
+      padding: 32px 24px;
+      text-align: center;
+      font-size: 13px;
+      color: var(--muted);
+    }
+    .landing-footer a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+    .landing-footer a:hover { text-decoration: underline; }
+    ` : ''}
   </style>
 </head>
 <body>
@@ -265,8 +499,132 @@ async function completeLogin(res, user, token, expiresAt) {
 }
 
 // ── GET / ─────────────────────────────────────────────────────────────
-router.get('/', requireAuth, (_req, res) => {
-  res.redirect('/dashboard');
+router.get('/', async (req, res) => {
+  // If already logged in, go straight to dashboard
+  const token = extractToken(req);
+  if (token) {
+    try {
+      await authService.validate(token);
+      return res.redirect('/dashboard');
+    } catch { /* show landing */ }
+  }
+
+  const body = `
+<nav class="landing-nav">
+  <div class="landing-nav-inner">
+    <a href="/" class="landing-logo">markco.dev</a>
+    <div class="landing-nav-links">
+      <a href="/sandbox">Try it</a>
+      <a href="https://github.com/MaximeRivest/markco-services">Source</a>
+      <a href="/login" class="btn primary" style="padding:6px 16px;font-size:13px">Sign in</a>
+    </div>
+  </div>
+</nav>
+
+<section class="landing-hero">
+  <h1>Markdown notebooks with code, collaboration, and publishing</h1>
+  <p class="subtitle">
+    Write prose, run code, see results inline. Python, R, Julia, JavaScript, and Bash
+    in a single document. Real-time collaboration. Publish to the web with one action.
+    Your files stay as plain <code>.md</code> files.
+  </p>
+  <div class="cta-row">
+    <a class="btn primary" href="/login">Get started</a>
+    <a class="btn ghost" href="/sandbox">Try in browser</a>
+  </div>
+</section>
+
+<section class="landing-section">
+  <h2>A document, not an app</h2>
+  <p>
+    Write markdown. Fence a code block. Run it. The output appears right below, in the same
+    document. Variables persist across cells. Everything is saved as a plain text file you can
+    version control, grep, and open in any editor.
+  </p>
+  <div class="code-preview">
+    <span class="cm"># Analysis</span><br><br>
+    <span class="punc">\`\`\`</span><span class="prop">python</span><br>
+    <span class="kw">import</span> pandas <span class="kw">as</span> pd<br>
+    df <span class="punc">=</span> pd<span class="punc">.</span><span class="fn">read_csv</span><span class="punc">(</span><span class="str">'data.csv'</span><span class="punc">)</span><br>
+    df<span class="punc">.</span><span class="fn">describe</span><span class="punc">()</span><br>
+    <span class="punc">\`\`\`</span>
+    <span class="out">       value    count<br>mean   42.3     1024<br>std    12.1      256</span>
+  </div>
+</section>
+
+<section class="landing-section">
+  <h2>Multi-language, one notebook</h2>
+  <p>
+    Each code block declares its language. Run Python for data, R for statistics, Julia for
+    simulation, Bash for system tasks, JavaScript for visualization -- all in the same file,
+    with outputs inline.
+  </p>
+  <div class="lang-list">
+    <span class="lang-tag">python</span>
+    <span class="lang-tag">r</span>
+    <span class="lang-tag">julia</span>
+    <span class="lang-tag">javascript</span>
+    <span class="lang-tag">bash</span>
+    <span class="lang-tag">html</span>
+    <span class="lang-tag">sql</span>
+    <span class="lang-tag">mermaid</span>
+  </div>
+</section>
+
+<section class="landing-section">
+  <h2>Built for depth</h2>
+  <div class="feature-grid">
+    <div class="feature-item">
+      <h3>Real-time collaboration</h3>
+      <p>CRDT-based editing. Multiple people work on the same document simultaneously.
+         Cursor presence, no conflicts, works offline and merges on reconnect.</p>
+    </div>
+    <div class="feature-item">
+      <h3>Runtime intelligence</h3>
+      <p>Hover a variable to see its value, not just its type. Autocomplete from the
+         live runtime session. Inspect dataframes, preview plots, explore state.</p>
+    </div>
+    <div class="feature-item">
+      <h3>Publish to the web</h3>
+      <p>One action turns a notebook into a published page. Share analysis, documentation,
+         or interactive articles as a URL. No export step.</p>
+    </div>
+    <div class="feature-item">
+      <h3>Themeable</h3>
+      <p>A unified design token system controls everything from syntax highlighting to
+         widgets to the shell. Ship your own theme or use the built-in dark and light modes.</p>
+    </div>
+    <div class="feature-item">
+      <h3>AI-native, not AI-dependent</h3>
+      <p>AI writes to the document the same way you do -- as a collaborator. It supports
+         thinking and exploration without replacing the work.</p>
+    </div>
+    <div class="feature-item">
+      <h3>Plain markdown files</h3>
+      <p>No proprietary format. No JSON cell arrays. Your documents are <code>.md</code> files.
+         Version control, diff, grep, and open them anywhere.</p>
+    </div>
+  </div>
+</section>
+
+<section class="landing-section">
+  <h2>Open source</h2>
+  <p>
+    The editor, runtimes, sync layer, and platform services are all open source. Build on top
+    of them, self-host, or use the hosted version at markco.dev.
+  </p>
+  <div class="cta-row" style="justify-content:flex-start">
+    <a class="btn primary" href="/login">Get started</a>
+    <a class="btn ghost" href="/sandbox">Try without an account</a>
+    <a class="btn ghost" href="https://github.com/MaximeRivest/markco-services">View source</a>
+  </div>
+</section>
+
+<footer class="landing-footer">
+  markco.dev -- built slowly, with care.
+</footer>`;
+
+  return res.send(renderPage('markco.dev — Markdown notebooks with code, collaboration, and publishing', body, { landing: true }));
 });
 
 // ── GET /login ────────────────────────────────────────────────────────
@@ -286,11 +644,11 @@ router.get('/login', async (req, res) => {
   const githubEnabled = Boolean(GITHUB_CLIENT_ID);
   const googleEnabled = Boolean(GOOGLE_CLIENT_ID);
 
-  const body = `<main class="card">
-    <h1>Welcome to markco.dev</h1>
+  const body = `<div class="page-card"><main class="card">
+    <h1>Sign in to markco.dev</h1>
     <p>Collaborative markdown notebooks with code, AI, and publishing.</p>
-    ${loggedOut ? '<div class="flash">You have been logged out.</div>' : ''}
-    ${error ? `<div class="flash" style="border-color:#c62828;background:rgba(244,67,54,0.1);color:#ef9a9a">Login failed: ${error}</div>` : ''}
+    ${loggedOut ? '<div class="flash" style="margin-top:16px">You have been logged out.</div>' : ''}
+    ${error ? `<div class="flash error" style="margin-top:16px">Login failed: ${error}</div>` : ''}
 
     <div class="stack">
       <a class="btn primary ${githubEnabled ? '' : 'disabled'}" href="${githubEnabled ? '/login/github' : '#'}">Continue with GitHub</a>
@@ -303,7 +661,7 @@ router.get('/login', async (req, res) => {
     </div>
 
     <p class="meta">Domain: <code>${escapeHtml(DOMAIN)}</code></p>
-  </main>`;
+  </main></div>`;
 
   return res.send(renderPage('markco.dev — Login', body));
 });
@@ -374,14 +732,14 @@ router.get('/dashboard', requireAuth, async (req, res) => {
       ? '<span class="pill">workspace ready</span>'
       : '<span class="pill" style="border-color:#e65100;background:rgba(255,152,0,0.08);color:#ff9800">starting…</span>';
 
-    const body = `<main class="card">
+    const body = `<div class="page-card"><main class="card">
       <h1>Welcome back, ${safeName}</h1>
       <p>Your workspace is running on markco.dev. ${statusBadge}</p>
 
       <div class="row" style="margin-top:24px">
         ${editorUrl
     ? `<a class="btn primary" href="${editorUrl}">Open Editor</a>`
-    : '<button class="btn" disabled>Starting workspace…</button>'}
+    : '<button class="btn" disabled>Starting workspace...</button>'}
         <a class="btn ghost" href="/sandbox">Open Guest Sandbox</a>
       </div>
 
@@ -392,7 +750,7 @@ router.get('/dashboard', requireAuth, async (req, res) => {
       </div>
 
       <p class="meta">Plan: <code>${escapeHtml(user.plan || 'free')}</code></p>
-    </main>
+    </main></div>
 
     <script>
       document.getElementById('logout-form').addEventListener('submit', async (e) => {
@@ -521,6 +879,18 @@ router.get('/sandbox', async (_req, res) => {
 
   // 6. Update page title
   html = html.replace(/<title>mrmd<\/title>/, '<title>markco.dev — Sandbox</title>');
+
+  // 7. Inject sandbox auto-open: open welcome.md instead of showing file picker
+  //    This replaces the setTimeout(showFilePicker, 100) at the end of init()
+  html = html.replace(
+    'setTimeout(showFilePicker, 100);',
+    `// [sandbox] Auto-open welcome.md instead of showing file picker
+      if (window.MRMD_SANDBOX) {
+        setTimeout(() => openFile('/sandbox/welcome.md'), 150);
+      } else {
+        setTimeout(showFilePicker, 100);
+      }`
+  );
 
   return res.type('html').send(html);
 });

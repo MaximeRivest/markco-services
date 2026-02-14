@@ -100,19 +100,32 @@
         });
 
         // Mock provider (the app expects editor.provider to exist)
+        const providerHandlers = {};
         editor.provider = {
           awareness: editor.awareness || { setLocalStateField() {}, getLocalState() { return {}; } },
           synced: true,
-          wsconnected: false,
+          wsconnected: true,
           ws: null,
           on(event, fn) {
+            if (!providerHandlers[event]) providerHandlers[event] = [];
+            providerHandlers[event].push(fn);
             // Immediately report "connected" status
             if (event === 'status') {
               setTimeout(() => fn({ status: 'connected' }), 0);
             }
           },
-          off() {},
-          once() {},
+          off(event, fn) {
+            if (providerHandlers[event]) {
+              providerHandlers[event] = providerHandlers[event].filter(h => h !== fn);
+            }
+          },
+          once(event, fn) {
+            const wrapper = (...args) => {
+              this.off(event, wrapper);
+              fn(...args);
+            };
+            this.on(event, wrapper);
+          },
           emit() {},
           disconnect() {},
           connect() {},
