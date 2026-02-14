@@ -6,20 +6,20 @@
 
 ## The Goal
 
-You install MarkCo on three devices. You sign in on each. From that moment forward, you never think about sync or compute again. Documents are everywhere. Runtimes find each other. If your desktop has a GPU, your phone uses it. If your desktop sleeps, the cloud catches it before you notice. **Zero configuration, zero manual choices.**
+You install MRMD on three devices. You sign in on each. From that moment forward, you never think about sync or compute again. Documents are everywhere. Runtimes find each other. If your desktop has a GPU, your phone uses it. If your desktop sleeps, the cloud catches it before you notice. **Zero configuration, zero manual choices.**
 
 ## How It Feels
 
 ### First install (desktop)
 
 ```
-Install MarkCo → launch → "Sign in with GitHub" → done.
+Install MRMD → launch → "Sign in with GitHub" → done.
 All your cloud projects appear in the sidebar.
 Create a new notebook. Write some Python. Hit Run.
 Python starts locally. Fast. Normal.
 
 In the background (you don't see this):
-  → MarkCo opens a persistent connection to markco.dev
+  → MRMD opens a persistent connection to markco.dev
   → Registers: "Maxime's MacBook Pro, Python 3.12, R 4.4, 
      Julia 1.11, RTX 4090, 32GB free"
   → Starts syncing document edits to cloud relay
@@ -28,7 +28,7 @@ In the background (you don't see this):
 ### Second install (phone)
 
 ```
-Install MarkCo → open → "Sign in with GitHub" → done.
+Install MRMD → open → "Sign in with GitHub" → done.
 All your projects are there. Tap one.
 The notebook loads instantly — content + outputs already synced.
 Tap Run on a cell.
@@ -65,7 +65,7 @@ The output is the same — same session state, restored from snapshot.
 ```
 You open your laptop the next morning.
 
-MarkCo reconnects to orchestrator.
+MRMD reconnects to orchestrator.
   → Orchestrator: "Welcome back. I have your Python session 
      running on cloud. Want me to migrate it back to you?"
   → Migration happens automatically (CRIU checkpoint on cloud → 
@@ -82,7 +82,7 @@ Back to local compute. Seamless.
 ### Third device (home laptop)
 
 ```
-Install MarkCo → sign in → projects appear.
+Install MRMD → sign in → projects appear.
 Open the same notebook you were working on.
 All content and outputs are there (Yjs sync).
 
@@ -99,7 +99,7 @@ The desktop is just a compute node in your personal mesh.
 
 ### The Device Registry
 
-Every MarkCo installation maintains a persistent WebSocket to the cloud orchestrator. This is the heartbeat.
+Every MRMD installation maintains a persistent WebSocket to the cloud orchestrator. This is the heartbeat.
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -185,7 +185,7 @@ When any client (desktop, phone, browser) hits Run on a cell:
          → Subsequent runs are fast
 ```
 
-**The critical design choice:** the desktop MarkCo app has its own smart router that tries local first, then falls back to cloud. This means when you're working on your desktop with no internet, everything works normally. The cloud is an accelerator, not a dependency.
+**The critical design choice:** the desktop MRMD app has its own smart router that tries local first, then falls back to cloud. This means when you're working on your desktop with no internet, everything works normally. The cloud is an accelerator, not a dependency.
 
 ```
 Desktop Smart Router:
@@ -282,7 +282,7 @@ Images, data files, plots — these are bigger than text and need different hand
 
 ```
 You drag an image into a notebook on your desktop.
-  → MarkCo hashes the file (SHA-256)
+  → MRMD hashes the file (SHA-256)
   → Uploads to cloud storage (S3/R2) by hash
   → Yjs document references it: ![plot](asset://sha256-a1b2c3...)
   → Phone receives the Yjs update
@@ -395,7 +395,7 @@ Desktop, no internet:
   → All local runtimes work (Python, R, Julia, Bash, JS)
   → Document edits are local, queued for sync
   → New outputs are local, queued for sync
-  → MarkCo works exactly like a normal desktop app
+  → MRMD works exactly like a normal desktop app
   → Status bar: "Offline — changes will sync when connected"
 
 Phone, no internet:
@@ -442,4 +442,4 @@ Phone, no internet:
 - Long-running detection (>30s → prefer cloud)
 - Cost optimization (use your own hardware when available)
 - Multi-user (share runtime with collaborator)
-- **Value: MarkCo is smarter than you about where to run things.**
+- **Value: MRMD is smarter than you about where to run things.**
