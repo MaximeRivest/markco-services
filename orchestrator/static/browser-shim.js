@@ -458,7 +458,7 @@ collaboration, and cloud persistence.
   }
 
   // ========================================================================
-  // FSML Navigation Builder
+  // FSML Utilities (ported from mrmd-project/src/fsml.js)
   // ========================================================================
 
   /**
@@ -479,6 +479,130 @@ collaboration, and cloud persistence.
   function isIndexFile(filename) {
     const lower = filename.toLowerCase();
     return lower === 'index.md' || lower === 'readme.md' || lower === 'index.qmd';
+  }
+
+  /**
+   * Parse a relative path into FSML components.
+   * Matches mrmd-project/src/fsml.js parsePath().
+   */
+  function fsmlParsePath(relativePath) {
+    if (!relativePath) {
+      return { path: '', order: null, name: '', extension: '', isFolder: false, parent: '' };
+    }
+    const p = relativePath.replace(/\/+$/, '');
+    const segments = p.split('/').filter(Boolean);
+    const parentPath = segments.slice(0, -1).join('/');
+    const filename = segments[segments.length - 1] || '';
+    const hasExtension = /\.[^./]+$/.test(filename);
+    const isFolder = !hasExtension;
+    const extMatch = filename.match(/(\.[^.]+)$/);
+    const extension = extMatch ? extMatch[1] : '';
+    const nameWithoutExt = filename.replace(/\.[^.]+$/, '');
+    const prefixMatch = nameWithoutExt.match(/^(\d+)[-_]/);
+    const order = prefixMatch ? parseInt(prefixMatch[1], 10) : null;
+    const name = prefixMatch ? nameWithoutExt.replace(/^\d+[-_]/, '') : nameWithoutExt;
+    return { path: p, order, name, extension, isFolder, parent: parentPath };
+  }
+
+  /**
+   * Compute renames needed for a reorder operation.
+   * Matches mrmd-project/src/fsml.js computeReorder().
+   */
+  function computeReorder(sourcePath, targetPath, position, allFiles) {
+    const source = fsmlParsePath(sourcePath);
+    const target = fsmlParsePath(targetPath);
+
+    let targetDir = '';
+    if (position === 'inside') {
+      targetDir = targetPath;
+    } else {
+      targetDir = target.parent;
+    }
+
+    // Siblings in target directory with numeric order
+    const siblingsInDir = allFiles
+      .filter(p => fsmlParsePath(p).parent === targetDir)
+      .map(p => ({ path: p, ...fsmlParsePath(p) }))
+      .filter(s => s.order !== null)
+      .sort((a, b) => a.order - b.order);
+
+    // Determine insert order
+    let insertOrder;
+    if (position === 'inside') {
+      const maxOrder = siblingsInDir.reduce((max, s) => Math.max(max, s.order || 0), 0);
+      insertOrder = maxOrder + 1;
+    } else if (position === 'before') {
+      insertOrder = target.order || 1;
+    } else {
+      insertOrder = (target.order || 0) + 1;
+    }
+
+    const paddedOrder = String(insertOrder).padStart(2, '0');
+    const sourceExt = source.isFolder ? '' : source.extension;
+    const newFilename = `${paddedOrder}-${source.name}${sourceExt}`;
+    const newPath = targetDir ? `${targetDir}/${newFilename}` : newFilename;
+
+    const renames = [];
+    const sourceInSameDir = source.parent === targetDir;
+
+    if (sourceInSameDir && source.order !== null) {
+      const sourceOrder = source.order;
+
+      if (sourceOrder < insertOrder) {
+        // Moving DOWN
+        const adjustedInsertOrder = insertOrder - 1;
+        for (const sibling of siblingsInDir) {
+          if (sibling.path === sourcePath) continue;
+          if (sibling.order > sourceOrder && sibling.order <= adjustedInsertOrder) {
+            const newO = String(sibling.order - 1).padStart(2, '0');
+            const sExt = sibling.isFolder ? '' : sibling.extension;
+            const np = targetDir ? `${targetDir}/${newO}-${sibling.name}${sExt}` : `${newO}-${sibling.name}${sExt}`;
+            if (sibling.path !== np) renames.push({ from: sibling.path, to: np });
+          }
+        }
+        const finalO = String(adjustedInsertOrder).padStart(2, '0');
+        const finalPath = targetDir ? `${targetDir}/${finalO}-${source.name}${sourceExt}` : `${finalO}-${source.name}${sourceExt}`;
+        if (sourcePath !== finalPath) renames.push({ from: sourcePath, to: finalPath });
+        return { newPath: finalPath, renames: sortRenames(renames, 'down') };
+
+      } else if (sourceOrder > insertOrder) {
+        // Moving UP
+        for (const sibling of siblingsInDir) {
+          if (sibling.path === sourcePath) continue;
+          if (sibling.order >= insertOrder && sibling.order < sourceOrder) {
+            const newO = String(sibling.order + 1).padStart(2, '0');
+            const sExt = sibling.isFolder ? '' : sibling.extension;
+            const np = targetDir ? `${targetDir}/${newO}-${sibling.name}${sExt}` : `${newO}-${sibling.name}${sExt}`;
+            if (sibling.path !== np) renames.push({ from: sibling.path, to: np });
+          }
+        }
+        if (sourcePath !== newPath) renames.push({ from: sourcePath, to: newPath });
+        return { newPath, renames: sortRenames(renames, 'up') };
+
+      } else {
+        return { newPath: sourcePath, renames: [] };
+      }
+    } else {
+      // Cross-directory move
+      for (const sibling of siblingsInDir) {
+        if (sibling.order >= insertOrder) {
+          const newO = String(sibling.order + 1).padStart(2, '0');
+          const sExt = sibling.isFolder ? '' : sibling.extension;
+          const np = targetDir ? `${targetDir}/${newO}-${sibling.name}${sExt}` : `${newO}-${sibling.name}${sExt}`;
+          if (sibling.path !== np) renames.push({ from: sibling.path, to: np });
+        }
+      }
+      if (sourcePath !== newPath) renames.push({ from: sourcePath, to: newPath });
+      return { newPath, renames: sortRenames(renames, 'up') };
+    }
+  }
+
+  function sortRenames(renames, direction) {
+    return renames.sort((a, b) => {
+      const aO = fsmlParsePath(a.from).order || 0;
+      const bO = fsmlParsePath(b.from).order || 0;
+      return direction === 'up' ? bO - aO : aO - bO;
+    });
   }
 
   /**
@@ -1155,8 +1279,10 @@ assets:
 
         const entry = await fsGet(fullFrom);
         if (!entry) {
-          return { success: false, error: 'Source not found' };
+          return { success: false, error: 'Source not found', movedFile: toPath, updatedFiles: [] };
         }
+
+        const updatedFiles = [];
 
         // If directory, move all children
         if (entry.isDir) {
@@ -1166,6 +1292,7 @@ assets:
             await ensureParentDirs(newChildPath);
             await fsPut({ ...child, path: newChildPath, parent: parentDir(newChildPath) });
             await fsDelete(child.path);
+            updatedFiles.push(newChildPath.slice(projectRoot.length + 1));
           }
         }
 
@@ -1173,15 +1300,58 @@ assets:
         await fsPut({ ...entry, path: fullTo, parent: parentDir(fullTo), modified: Date.now() });
         await fsDelete(fullFrom);
 
+        updatedFiles.push(toPath);
         emit('project:changed', { projectRoot });
-        return { success: true, from: fromPath, to: toPath };
+        return { success: true, movedFile: toPath, updatedFiles };
       },
 
       reorder: async (projectRoot, sourcePath, targetPath, position) => {
-        // Reordering is a no-op for IndexedDB (ordering is managed by the nav tree)
-        // The editor will just refresh the nav tree on next project.get()
-        console.log('[browser-shim] file.reorder stub:', sourcePath, '->', targetPath, position);
-        return { success: true };
+        // Get all files for sibling computation
+        const entries = await fsListPrefix(projectRoot + '/');
+        const allFiles = entries
+          .filter(e => !e.isDir)
+          .map(e => e.path.slice(projectRoot.length + 1))
+          .filter(f => !f.split('/').some(p => p.startsWith('.')));
+
+        // Compute the renames using FSML logic
+        const { newPath, renames } = computeReorder(sourcePath, targetPath, position, allFiles);
+
+        if (renames.length === 0) {
+          return { success: true, movedFile: sourcePath, updatedFiles: [] };
+        }
+
+        console.log('[browser-shim] file.reorder:', sourcePath, '->', newPath, `(${renames.length} renames)`);
+
+        const updatedFiles = [];
+
+        // Execute renames in order (sorted to avoid collisions)
+        for (const rename of renames) {
+          const fullFrom = normalizePath(projectRoot + '/' + rename.from);
+          const fullTo = normalizePath(projectRoot + '/' + rename.to);
+
+          const entry = await fsGet(fullFrom);
+          if (!entry) continue; // May have been renamed already in batch
+
+          await ensureParentDirs(fullTo);
+          await fsPut({ ...entry, path: fullTo, parent: parentDir(fullTo), modified: Date.now() });
+          await fsDelete(fullFrom);
+
+          // If directory, also move children
+          if (entry.isDir) {
+            const children = await fsListPrefix(fullFrom + '/');
+            for (const child of children) {
+              const newChildPath = fullTo + child.path.slice(fullFrom.length);
+              await ensureParentDirs(newChildPath);
+              await fsPut({ ...child, path: newChildPath, parent: parentDir(newChildPath) });
+              await fsDelete(child.path);
+            }
+          }
+
+          updatedFiles.push(rename.to);
+        }
+
+        emit('project:changed', { projectRoot });
+        return { success: true, movedFile: newPath, updatedFiles };
       },
     },
 
