@@ -1,13 +1,17 @@
 /**
- * Generate Caddy JSON config for the feuille.dev platform.
- * This is the base config; dynamic user routes are added at runtime via the admin API.
+ * Generate Caddy JSON config for the markco.dev platform.
  */
 
-const DOMAIN = process.env.DOMAIN || 'feuille.dev';
+const DOMAIN = process.env.DOMAIN || 'markco.dev';
+const IS_LOCAL_DOMAIN = /^(\d|localhost)/.test(DOMAIN);
+const HOSTS = IS_LOCAL_DOMAIN ? [DOMAIN] : [DOMAIN, `www.${DOMAIN}`];
+
+function matchPath(path) {
+  return [{ host: HOSTS, path: [path] }];
+}
 
 /**
  * Generate the full Caddy JSON config.
- * Dynamic per-user routes (e.g. /u/{userId}/*) are added later via caddy.addRoute().
  */
 export function generateCaddyConfig() {
   return {
@@ -23,16 +27,16 @@ export function generateCaddyConfig() {
               // Published sites: /@*
               {
                 '@id': 'publish',
-                match: [{ path: ['/@*'] }],
+                match: matchPath('/@*'),
                 handle: [{
                   handler: 'reverse_proxy',
                   upstreams: [{ dial: 'localhost:3003' }],
                 }],
               },
-              // Auth callback → orchestrator (handles OAuth exchange + cookie)
+              // Auth callback → orchestrator
               {
                 '@id': 'auth-callback',
-                match: [{ path: ['/auth/callback/*'] }],
+                match: matchPath('/auth/callback/*'),
                 handle: [{
                   handler: 'reverse_proxy',
                   upstreams: [{ dial: 'localhost:3000' }],
@@ -41,7 +45,7 @@ export function generateCaddyConfig() {
               // Auth API routes → auth-service
               {
                 '@id': 'auth',
-                match: [{ path: ['/auth/*'] }],
+                match: matchPath('/auth/*'),
                 handle: [{
                   handler: 'reverse_proxy',
                   upstreams: [{ dial: 'localhost:3001' }],
@@ -50,33 +54,48 @@ export function generateCaddyConfig() {
               // Join/invite routes
               {
                 '@id': 'join',
-                match: [{ path: ['/join/*'] }],
+                match: matchPath('/join/*'),
                 handle: [{
                   handler: 'reverse_proxy',
                   upstreams: [{ dial: 'localhost:3001' }],
                 }],
               },
-              // API & orchestrator routes
+              // API routes
               {
                 '@id': 'api',
-                match: [{ path: ['/api/*'] }],
+                match: matchPath('/api/*'),
                 handle: [{
                   handler: 'reverse_proxy',
                   upstreams: [{ dial: 'localhost:3000' }],
                 }],
               },
-              // Orchestrator handles login, dashboard, hooks, user editor routes, default
+              // Orchestrator user-facing routes
               {
                 '@id': 'orchestrator-pages',
-                match: [{ path: ['/login', '/dashboard', '/hooks/*', '/projects/*', '/u/*'] }],
+                match: [{
+                  host: HOSTS,
+                  path: ['/login', '/login/*', '/dashboard', '/sandbox', '/hooks/*', '/projects/*', '/u/*', '/logout', '/api/logout'],
+                }],
                 handle: [{
                   handler: 'reverse_proxy',
                   upstreams: [{ dial: 'localhost:3000' }],
                 }],
+              },
+              // Static assets (editor JS, reader JS)
+              {
+                '@id': 'static',
+                match: [{ host: HOSTS, path: ['/static/*'] }],
+                handle: [
+                  {
+                    handler: 'file_server',
+                    root: '/opt/markco/static',
+                  },
+                ],
               },
               // Default fallback → orchestrator
               {
                 '@id': 'fallback',
+                match: [{ host: HOSTS }],
                 handle: [{
                   handler: 'reverse_proxy',
                   upstreams: [{ dial: 'localhost:3000' }],

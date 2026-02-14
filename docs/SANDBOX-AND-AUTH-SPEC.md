@@ -1,6 +1,6 @@
 # Sandbox & Auth — Design Spec
 
-> Status: **approved design, not yet implemented**
+> Status: **Phase 1 implemented and deployed** (browser-shim.js + sandbox serving)
 > Created: 2026-02-14
 > Last context: domain migration to markco.dev complete, systemd renamed to markco.service,
 > login/dashboard pages redesigned and deployed, placeholder sandbox deployed (needs replacement).
@@ -294,16 +294,24 @@ The AI service in the editor is configured to call `/api/ai/proxy` with the user
 
 ## 8. Implementation Order
 
-### Phase 1: browser-shim.js + sandbox serving (core)
-**Files to create:**
-- `markco-services/orchestrator/static/browser-shim.js` — full electronAPI shim backed by IndexedDB
-- Update `markco-services/orchestrator/src/routes/main.js` — `/sandbox` serves real index.html with browser-shim
+### Phase 1: browser-shim.js + sandbox serving (core) — ✅ DONE
+**Files created:**
+- `markco-services/orchestrator/static/browser-shim.js` — full electronAPI shim backed by IndexedDB (36KB)
+- `markco-services/orchestrator/static/sandbox-bridge.js` — patches mrmd.drive() for local editing (7KB)
+- Updated `markco-services/orchestrator/src/routes/main.js` — `/sandbox` dynamically transforms real index.html
+- Static assets deployed: fonts, icons, xterm stubs at `/opt/markco/static/static/`
+- Caddy config updated with `/opt/markco/static` root
 
-**Files to modify:**
-- Caddy config to serve `browser-shim.js` from `/static/`
-- Copy `mrmd-electron/index.html` to static serving path (or read + inject at serve time)
+**How it works:**
+- `/sandbox` reads `/opt/markco/editor-build/mrmd-electron/index.html` (the real 14k-line editor)
+- Replaces CSP, script paths, font/asset URLs
+- Injects browser-shim.js (before mrmd.iife.js) and sandbox-bridge.js (after)
+- browser-shim.js provides window.electronAPI backed by IndexedDB + localStorage
+- sandbox-bridge.js patches mrmd.drive() to create local editors via mrmd.create()
+- Auto-saves editor content to IndexedDB on changes (1s debounce)
+- Seeds default project on first visit (/sandbox/mrmd.md + /sandbox/welcome.md)
 
-**Test:** Visit `/sandbox`, see full editor UI with file tree, create/rename files, edit markdown.
+**Test:** Visit `https://markco.dev/sandbox`, see full editor UI with file tree, create/rename files, edit markdown.
 
 ### Phase 2: Pyodide runtime
 **Files to create:**
@@ -390,13 +398,9 @@ mrmd-server/
 ### On server (52.60.156.234)
 ```
 /etc/systemd/system/markco.service
-/opt/feuille/feuille-services/orchestrator/   ← deployed orchestrator code
-/opt/feuille/feuille-services/auth-service/   ← deployed auth code
-/opt/feuille/static/static/mrmd.iife.js       ← editor JS bundle
-/opt/feuille/static/static/mrmd-reader.iife.js
-/opt/feuille/editor-build/mrmd-electron/      ← editor container build context
+/opt/markco/markco-services/orchestrator/     ← deployed orchestrator code
+/opt/markco/markco-services/auth-service/     ← deployed auth code
+/opt/markco/static/static/mrmd.iife.js        ← editor JS bundle
+/opt/markco/static/static/mrmd-reader.iife.js
+/opt/markco/editor-build/mrmd-electron/       ← editor container build context
 ```
-
-> Note: Server paths still use `/opt/feuille/` — renaming server paths is low priority
-> and would require updating systemd WorkingDirectory, Dockerfiles, and deploy scripts.
-> The important thing is the user-facing domain is markco.dev.
