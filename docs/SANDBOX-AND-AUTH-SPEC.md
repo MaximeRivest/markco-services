@@ -1,6 +1,6 @@
 # Sandbox & Auth — Design Spec
 
-> Status: **Phase 1 implemented and deployed** (browser-shim.js + sandbox serving)
+> Status: **Phase 1+2 implemented and deployed** (full editor sandbox + Python/R Wasm runtimes)
 > Created: 2026-02-14
 > Last context: domain migration to markco.dev complete, systemd renamed to markco.service,
 > login/dashboard pages redesigned and deployed, placeholder sandbox deployed (needs replacement).
@@ -313,11 +313,19 @@ The AI service in the editor is configured to call `/api/ai/proxy` with the user
 
 **Test:** Visit `https://markco.dev/sandbox`, see full editor UI with file tree, create/rename files, edit markdown.
 
-### Phase 2: Pyodide runtime
-**Files to create:**
-- `markco-services/orchestrator/static/pyodide-runtime.js` — Pyodide wrapper with MRP runtime interface
+### Phase 2: Pyodide + WebR runtimes — ✅ DONE
+**Files created:**
+- `markco-services/orchestrator/static/pyodide-runtime.js` — Python via Pyodide (CPython 3.12 Wasm)
+- `markco-services/orchestrator/static/webr-runtime.js` — R via WebR (R 4.x Wasm)
 
-**Test:** Write a Python cell in sandbox, hit Shift+Enter, see output. `import numpy` works.
+**How it works:**
+- Both scripts expose global runtime objects (MRMD_PYODIDE_RUNTIME, MRMD_WEBR_RUNTIME)
+- sandbox-bridge.js registers them with the editor after drive.open()
+- Lazy-loaded: Pyodide ~10MB, WebR ~20MB, both cached by browser
+- Auto-package install for Python (micropip), base packages for R
+- Julia: no Wasm runtime exists — stays as "Sign in for Julia"
+
+**Test:** Write `python` or `r` code block in sandbox, hit Shift+Enter.
 
 ### Phase 3: AI proxy
 **Files to create:**
