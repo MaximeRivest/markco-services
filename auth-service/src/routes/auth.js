@@ -11,6 +11,39 @@ function generateToken() {
   return crypto.randomBytes(32).toString('base64url');
 }
 
+function normalizeUsername(input) {
+  const raw = String(input || '').trim().toLowerCase();
+  const cleaned = raw
+    .replace(/[^a-z0-9._-]/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^[._-]+|[._-]+$/g, '');
+
+  let username = cleaned || 'user';
+  if (!/^[a-z_]/.test(username)) {
+    username = `u_${username}`;
+  }
+
+  // Keep Linux-friendly length (common max is 32 chars)
+  return username.slice(0, 32);
+}
+
+async function ensureUniqueUsername(baseUsername, existingUserId = null) {
+  const base = normalizeUsername(baseUsername);
+
+  for (let i = 0; i < 500; i++) {
+    const suffix = i === 0 ? '' : `_${i + 1}`;
+    const maxBaseLen = 32 - suffix.length;
+    const candidate = `${base.slice(0, Math.max(1, maxBaseLen))}${suffix}`;
+
+    const { rows } = await pool.query('SELECT id FROM users WHERE username = $1 LIMIT 1', [candidate]);
+    if (rows.length === 0) return candidate;
+    if (existingUserId && rows[0].id === existingUserId) return candidate;
+  }
+
+  // Extremely unlikely fallback
+  return `u_${crypto.randomBytes(6).toString('hex').slice(0, 12)}`;
+}
+
 async function createSession(userId) {
   const token = generateToken();
   const expiresAt = new Date(Date.now() + SESSION_TTL_DAYS * 24 * 60 * 60 * 1000);
@@ -24,7 +57,7 @@ async function createSession(userId) {
 /**
  * Upsert a user by provider ID, returning the user row.
  */
-async function upsertUser({ email, name, avatarUrl, githubId, googleId }) {
+async function upsertUser({ email, name, avatarUrl, githubId, googleId, usernameCandidate }) {
   const idCol = githubId ? 'github_id' : 'google_id';
   const idVal = githubId || googleId;
 
@@ -33,11 +66,17 @@ async function upsertUser({ email, name, avatarUrl, githubId, googleId }) {
     `SELECT * FROM users WHERE ${idCol} = $1`, [idVal]
   );
   if (existing.rows.length > 0) {
-    // Update name/avatar on each login
+    const existingUser = existing.rows[0];
+    const resolvedUsername = existingUser.username || await ensureUniqueUsername(usernameCandidate || email.split('@')[0], existingUser.id);
+
+    // Update name/avatar on each login + backfill username if missing
     const { rows } = await pool.query(
-      `UPDATE users SET name = COALESCE($1, name), avatar_url = COALESCE($2, avatar_url)
-       WHERE ${idCol} = $3 RETURNING *`,
-      [name, avatarUrl, idVal]
+      `UPDATE users
+       SET name = COALESCE($1, name),
+           avatar_url = COALESCE($2, avatar_url),
+           username = COALESCE(username, $3)
+       WHERE ${idCol} = $4 RETURNING *`,
+      [name, avatarUrl, resolvedUsername, idVal]
     );
     return rows[0];
   }
@@ -45,19 +84,27 @@ async function upsertUser({ email, name, avatarUrl, githubId, googleId }) {
   // Try to find by email and link the provider
   const byEmail = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
   if (byEmail.rows.length > 0) {
+    const existingUser = byEmail.rows[0];
+    const resolvedUsername = existingUser.username || await ensureUniqueUsername(usernameCandidate || email.split('@')[0], existingUser.id);
+
     const { rows } = await pool.query(
-      `UPDATE users SET ${idCol} = $1, name = COALESCE($2, name), avatar_url = COALESCE($3, avatar_url)
-       WHERE email = $4 RETURNING *`,
-      [idVal, name, avatarUrl, email]
+      `UPDATE users
+       SET ${idCol} = $1,
+           name = COALESCE($2, name),
+           avatar_url = COALESCE($3, avatar_url),
+           username = COALESCE(username, $4)
+       WHERE email = $5 RETURNING *`,
+      [idVal, name, avatarUrl, resolvedUsername, email]
     );
     return rows[0];
   }
 
   // Create new user
+  const resolvedUsername = await ensureUniqueUsername(usernameCandidate || email.split('@')[0]);
   const { rows } = await pool.query(
-    `INSERT INTO users (email, name, avatar_url, ${idCol})
-     VALUES ($1, $2, $3, $4) RETURNING *`,
-    [email, name, avatarUrl, idVal]
+    `INSERT INTO users (email, username, name, avatar_url, ${idCol})
+     VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+    [email, resolvedUsername, name, avatarUrl, idVal]
   );
   return rows[0];
 }
@@ -122,12 +169,20 @@ router.post('/auth/github', async (req, res) => {
       name: ghUser.name || ghUser.login,
       avatarUrl: ghUser.avatar_url,
       githubId: String(ghUser.id),
+      usernameCandidate: ghUser.login || email.split('@')[0],
     });
 
     const session = await createSession(user.id);
 
     res.json({
-      user: { id: user.id, email: user.email, name: user.name, avatar_url: user.avatar_url, plan: user.plan },
+      user: {
+        id: user.id,
+        email: user.email,
+        username: user.username,
+        name: user.name,
+        avatar_url: user.avatar_url,
+        plan: user.plan,
+      },
       token: session.token,
       expires_at: session.expiresAt,
     });
@@ -153,7 +208,14 @@ router.post('/auth/google', async (req, res) => {
 router.get('/auth/validate', requireAuth, (req, res) => {
   const u = req.user;
   res.json({
-    user: { id: u.id, email: u.email, name: u.name, avatar_url: u.avatar_url, plan: u.plan },
+    user: {
+      id: u.id,
+      email: u.email,
+      username: u.username,
+      name: u.name,
+      avatar_url: u.avatar_url,
+      plan: u.plan,
+    },
   });
 });
 

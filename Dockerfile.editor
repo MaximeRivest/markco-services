@@ -49,14 +49,14 @@ RUN node -e " \
 RUN npm install --production
 
 # node:22-slim already has uid 1000 as 'node' user
-# Make app readable by node user and create home mount point
-RUN chown -R node:node /app && mkdir -p /home/user && chown node:node /home/user
+# Make app readable by node user
+RUN chown -R node:node /app
 
 # Install Julia dependencies as node user so compiled cache is accessible at runtime
 USER node
 ENV JULIA_DEPOT_PATH="/app/.julia"
 RUN cd /app/mrmd-julia && julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.precompile()'
-WORKDIR /home/user
+WORKDIR /home/node
 
 EXPOSE 8080
 

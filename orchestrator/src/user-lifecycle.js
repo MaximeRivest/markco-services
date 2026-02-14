@@ -10,7 +10,7 @@
 
 import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, existsSync, writeFileSync, symlinkSync } from 'node:fs';
 import { computeManager, resourceMonitor } from './service-client.js';
 // Note: Caddy routes /u/* to orchestrator, which proxies to editor containers.
 // No per-user Caddy routes needed.
@@ -54,8 +54,11 @@ async function startEditorContainer(userId, editorPort, runtimePort, user = {}) 
   const containerName = `editor-${userId.slice(0, 8)}`;
   const userDir = `${DATA_DIR}/${userId}`;
 
-  // Ensure user data directory exists
+  // Ensure user data directory exists with correct ownership for container's node user (uid 1000)
   mkdirSync(userDir, { recursive: true });
+  try {
+    await execFile('sudo', ['chown', '1000:1000', userDir], { timeout: 5000 });
+  } catch { /* best effort — may already be correct */ }
 
   // Remove stale container with same name if it exists
   try {
@@ -68,7 +71,7 @@ async function startEditorContainer(userId, editorPort, runtimePort, user = {}) 
     '--name', containerName,
     '--network=host',
     '--memory=512m',
-    '-v', `${userDir}:/home/user`,
+    '-v', `${userDir}:/home/node`,
     '-e', `CLOUD_MODE=1`,
     '-e', `RUNTIME_PORT=${runtimePort}`,
     '-e', `PORT=${editorPort}`,
@@ -83,7 +86,7 @@ async function startEditorContainer(userId, editorPort, runtimePort, user = {}) 
     '--port', String(editorPort),
     '--host', '0.0.0.0',
     '--no-auth',
-    '/home/user',
+    '/home/node',
   ];
 
   const { stdout } = await execFile('sudo', args, { timeout: 30000 });
