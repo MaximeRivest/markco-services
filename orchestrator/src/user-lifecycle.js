@@ -50,7 +50,7 @@ async function waitForHealth(port, path = '/health', timeoutMs = 30000) {
  * Start an editor container via podman.
  * Uses --network=host so the editor can reach the runtime container's host-mapped port.
  */
-async function startEditorContainer(userId, editorPort, runtimePort) {
+async function startEditorContainer(userId, editorPort, runtimePort, user = {}) {
   const containerName = `editor-${userId.slice(0, 8)}`;
   const userDir = `${DATA_DIR}/${userId}`;
 
@@ -73,6 +73,11 @@ async function startEditorContainer(userId, editorPort, runtimePort) {
     '-e', `RUNTIME_PORT=${runtimePort}`,
     '-e', `PORT=${editorPort}`,
     '-e', `BASE_PATH=/u/${userId}/`,
+    '-e', `CLOUD_USER_ID=${userId}`,
+    '-e', `CLOUD_USER_NAME=${user.name || ''}`,
+    '-e', `CLOUD_USER_EMAIL=${user.email || ''}`,
+    '-e', `CLOUD_USER_AVATAR=${user.avatar_url || ''}`,
+    '-e', `CLOUD_USER_PLAN=${user.plan || 'free'}`,
     EDITOR_IMAGE,
     'node', '/app/mrmd-server/bin/cli.js',
     '--port', String(editorPort),
@@ -133,7 +138,7 @@ export async function onUserLogin(user) {
   // 2. Start editor container
   const editorPort = randomPort();
   const { containerName: editorContainer } = await startEditorContainer(
-    userId, editorPort, runtime.port,
+    userId, editorPort, runtime.port, user,
   );
   console.log(`[lifecycle] Editor container ${editorContainer} started on port ${editorPort}`);
 
