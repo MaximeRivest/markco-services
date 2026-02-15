@@ -2,7 +2,7 @@
     admin localhost:2019
 }
 
-feuille.dev {
+markco.dev {
     # Published sites
     handle /@* {
         reverse_proxy localhost:3003
@@ -23,8 +23,23 @@ feuille.dev {
     handle /login {
         reverse_proxy localhost:3000
     }
+    handle /login/* {
+        reverse_proxy localhost:3000
+    }
+    handle /sandbox {
+        reverse_proxy localhost:3000
+    }
+    handle /logout {
+        reverse_proxy localhost:3000
+    }
     handle /dashboard {
         reverse_proxy localhost:3000
+    }
+
+    # Static assets (editor JS, sandbox shims, fonts, xterm)
+    handle /static/* {
+        root * /opt/markco/static
+        file_server
     }
 
     # Default: orchestrator handles routing
