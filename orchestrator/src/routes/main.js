@@ -1516,9 +1516,9 @@ router.get('/sandbox', async (_req, res) => {
   /* ── Dropdown panel ── */
   .sandbox-cta-dropdown {
     display: none;
-    position: absolute;
-    top: calc(100% + 8px);
-    right: 0;
+    position: fixed;
+    top: 56px;
+    right: 12px;
     background: var(--bg-secondary, #161b22);
     border: 1px solid var(--border, #30363d);
     border-radius: 10px;
@@ -1530,7 +1530,7 @@ router.get('/sandbox', async (_req, res) => {
   }
   .sandbox-cta-dropdown.open { display: block; }
 
-  /* Scrim behind dropdown on mobile */
+  /* Scrim (enabled on mobile only) */
   .sandbox-cta-scrim {
     display: none;
     position: fixed;
@@ -1538,7 +1538,7 @@ router.get('/sandbox', async (_req, res) => {
     background: rgba(0,0,0,0.4);
     z-index: 9999;
   }
-  .sandbox-cta-scrim.open { display: block; }
+  .sandbox-cta-scrim.open { display: none; }
   .sandbox-cta-header {
     padding: 14px 16px;
     border-bottom: 1px solid var(--border, #30363d);
@@ -1598,8 +1598,8 @@ router.get('/sandbox', async (_req, res) => {
     font-weight: 400;
   }
 
-  /* ── Mobile: icon-only circle, lives inside titlebar flex flow ── */
-  @media (max-width: 768px) {
+  /* ── Mobile / touch: icon-only button + bottom sheet ── */
+  @media (max-width: 900px), (hover: none) and (pointer: coarse) {
     /* Reset the desktop shift — mobile layout is flex-based */
     .titlebar-mobile-actions {
       right: auto !important;
@@ -1620,7 +1620,9 @@ router.get('/sandbox', async (_req, res) => {
       border-width: 1.5px;
     }
     .sandbox-cta-label { display: none; }
+
     .sandbox-cta-dropdown {
+      display: block;
       position: fixed;
       top: auto;
       bottom: 0;
@@ -1634,14 +1636,19 @@ router.get('/sandbox', async (_req, res) => {
       box-shadow: none;
       z-index: 10000;
       padding-bottom: env(safe-area-inset-bottom, 0px);
+      visibility: hidden;
+      opacity: 0;
+      transform: translateY(100%);
+      pointer-events: none;
+      transition: transform 0.25s cubic-bezier(0.2, 0, 0, 1), opacity 0.2s ease;
     }
     .sandbox-cta-dropdown.open {
-      animation: sandbox-slide-up 0.25s cubic-bezier(0.2, 0, 0, 1);
+      visibility: visible;
+      opacity: 1;
+      transform: translateY(0);
+      pointer-events: auto;
     }
-    @keyframes sandbox-slide-up {
-      from { transform: translateY(100%); }
-      to { transform: translateY(0); }
-    }
+
     .sandbox-cta-scrim.open {
       display: block;
       animation: sandbox-fade-in 0.2s ease;
@@ -1650,6 +1657,7 @@ router.get('/sandbox', async (_req, res) => {
       from { opacity: 0; }
       to { opacity: 1; }
     }
+
     .sandbox-cta-header {
       padding: 20px 20px 14px;
       position: relative;
@@ -1679,63 +1687,85 @@ router.get('/sandbox', async (_req, res) => {
 <script>
 (function() {
   var checkSvg = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 8.5l4 4 8-9"/></svg>';
+  var mobileSheetQuery = '(max-width: 900px), (hover: none) and (pointer: coarse)';
+
+  function shouldUseMobileSheet() {
+    try {
+      return window.matchMedia(mobileSheetQuery).matches;
+    } catch (_err) {
+      return window.innerWidth <= 900;
+    }
+  }
 
   function initSandboxCta() {
     var titlebar = document.querySelector('.titlebar');
-    if (!titlebar) return;
+    if (!titlebar || document.querySelector('.sandbox-cta')) return;
 
     var c = document.createElement('div');
     c.className = 'sandbox-cta';
-
-    var noteSvg = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6.5"/><path d="M8 5v3.5M8 10.5v.5"/></svg>';
-
     c.innerHTML =
-      '<button class="sandbox-cta-btn" title="Sign in to markco.dev">' +
+      '<button class="sandbox-cta-btn" title="Sign in to markco.dev" aria-haspopup="dialog" aria-expanded="false">' +
         '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a8 8 0 110 16A8 8 0 018 0zm0 1.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13zM8 3a2.5 2.5 0 110 5 2.5 2.5 0 010-5zm0 6.5c2.5 0 4.5 1.2 4.5 2.5v.5h-9v-.5c0-1.3 2-2.5 4.5-2.5z"/></svg>' +
         '<span class="sandbox-cta-label">Sign in</span>' +
-      '</button>' +
-      '<div class="sandbox-cta-dropdown">' +
-        '<div class="sandbox-cta-header">' +
-          '<div class="sandbox-cta-current">' +
-            '<span class="sandbox-cta-badge">Sandbox</span>' +
-            '<p>Your work is saved in this browser\u2019s local storage. It stays here as long as you don\u2019t clear your browser data.</p>' +
-          '</div>' +
+      '</button>';
+
+    var dropdown = document.createElement('div');
+    dropdown.className = 'sandbox-cta-dropdown';
+    dropdown.innerHTML =
+      '<div class="sandbox-cta-header">' +
+        '<div class="sandbox-cta-current">' +
+          '<span class="sandbox-cta-badge">Sandbox</span>' +
+          '<p>Your work is saved in this browser\u2019s local storage. It stays here as long as you don\u2019t clear your browser data.</p>' +
         '</div>' +
-        '<div class="sandbox-cta-upgrade">' +
-          '<h3>Sign in for more</h3>' +
-          '<ul class="sandbox-cta-features">' +
-            '<li>' + checkSvg + 'Cloud sync across all your devices</li>' +
-            '<li>' + checkSvg + 'Bash, terminal &amp; Julia runtimes</li>' +
-            '<li>' + checkSvg + 'Real-time collaboration</li>' +
-            '<li>' + checkSvg + 'Publish notebooks to the web</li>' +
-          '</ul>' +
-        '</div>' +
-        '<div class="sandbox-cta-actions">' +
-          '<a href="/login" class="primary-action">Sign in / Sign up</a>' +
-          '<span class="sandbox-cta-free">Free \u2014 no credit card</span>' +
-        '</div>' +
+      '</div>' +
+      '<div class="sandbox-cta-upgrade">' +
+        '<h3>Sign in for more</h3>' +
+        '<ul class="sandbox-cta-features">' +
+          '<li>' + checkSvg + 'Cloud sync across all your devices</li>' +
+          '<li>' + checkSvg + 'Bash, terminal &amp; Julia runtimes</li>' +
+          '<li>' + checkSvg + 'Real-time collaboration</li>' +
+          '<li>' + checkSvg + 'Publish notebooks to the web</li>' +
+        '</ul>' +
+      '</div>' +
+      '<div class="sandbox-cta-actions">' +
+        '<a href="/login" class="primary-action">Sign in / Sign up</a>' +
+        '<span class="sandbox-cta-free">Free \u2014 no credit card</span>' +
       '</div>';
 
-    // Add scrim element for mobile backdrop
     var scrim = document.createElement('div');
     scrim.className = 'sandbox-cta-scrim';
-    document.body.appendChild(scrim);
 
     titlebar.appendChild(c);
+    document.body.appendChild(scrim);
+    document.body.appendChild(dropdown);
 
     var btn = c.querySelector('.sandbox-cta-btn');
-    var dropdown = c.querySelector('.sandbox-cta-dropdown');
+
+    function positionDesktopDropdown() {
+      if (shouldUseMobileSheet()) return;
+      var rect = btn.getBoundingClientRect();
+      dropdown.style.top = Math.round(rect.bottom + 8) + 'px';
+      dropdown.style.right = Math.max(8, Math.round(window.innerWidth - rect.right)) + 'px';
+      dropdown.style.left = 'auto';
+    }
 
     function openDropdown() {
+      positionDesktopDropdown();
       dropdown.classList.add('open');
-      scrim.classList.add('open');
+      btn.setAttribute('aria-expanded', 'true');
+      if (shouldUseMobileSheet()) {
+        scrim.classList.add('open');
+      }
     }
+
     function closeDropdown() {
       dropdown.classList.remove('open');
       scrim.classList.remove('open');
+      btn.setAttribute('aria-expanded', 'false');
     }
 
     btn.addEventListener('click', function(e) {
+      e.preventDefault();
       e.stopPropagation();
       if (dropdown.classList.contains('open')) {
         closeDropdown();
@@ -1747,7 +1777,27 @@ router.get('/sandbox', async (_req, res) => {
     scrim.addEventListener('click', closeDropdown);
 
     document.addEventListener('click', function(e) {
-      if (!c.contains(e.target)) closeDropdown();
+      if (!dropdown.classList.contains('open')) return;
+      if (c.contains(e.target) || dropdown.contains(e.target)) return;
+      closeDropdown();
+    });
+
+    document.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape') closeDropdown();
+    });
+
+    window.addEventListener('resize', function() {
+      if (dropdown.classList.contains('open')) {
+        if (shouldUseMobileSheet()) {
+          dropdown.style.top = '';
+          dropdown.style.right = '';
+          dropdown.style.left = '';
+          scrim.classList.add('open');
+        } else {
+          scrim.classList.remove('open');
+          positionDesktopDropdown();
+        }
+      }
     });
 
     dropdown.addEventListener('click', function(e) {
