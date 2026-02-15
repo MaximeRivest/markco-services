@@ -1,5 +1,5 @@
 /**
- * feuille.dev orchestrator — the single entry point for the platform.
+ * markco.dev orchestrator — the single entry point for the platform.
  *
  * Starts all Layer 3 services, configures Caddy, registers webhooks,
  * and serves as the main HTTP server on port 3000.
@@ -12,7 +12,7 @@ import { startAll, stopAll } from './process-manager.js';
 import { resourceMonitor, authService } from './service-client.js';
 import { loadConfig, healthCheck as caddyHealthCheck } from './caddy.js';
 import { generateCaddyConfig } from './caddy-config.js';
-import { getEditorInfo } from './user-lifecycle.js';
+import { getEditorInfo, reconcileContainers, startHealthChecks } from './user-lifecycle.js';
 import mainRoutes from './routes/main.js';
 import apiRoutes from './routes/api.js';
 import eventHandler from './event-handler.js';
@@ -20,7 +20,8 @@ import eventHandler from './event-handler.js';
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const app = express();
 
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: false, limit: '50mb' }));
 app.use(cookieParser());
 
 // Trust proxy (behind Caddy)
@@ -43,7 +44,7 @@ app.use((err, _req, res, _next) => {
 });
 
 async function start() {
-  console.log('[orchestrator] Starting feuille.dev platform...');
+  console.log('[orchestrator] Starting markco.dev platform...');
 
   // 1. Start all Layer 3 services
   await startAll();
@@ -139,6 +140,16 @@ async function start() {
   }
 
   console.log('[orchestrator] Platform ready');
+
+  // 5. Reconcile any running containers from before the restart
+  try {
+    await reconcileContainers();
+  } catch (err) {
+    console.warn(`[orchestrator] Container reconciliation failed: ${err.message}`);
+  }
+
+  // 6. Start periodic health checks for active containers
+  startHealthChecks();
 
   // Graceful shutdown
   async function shutdown(signal) {
