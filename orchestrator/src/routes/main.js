@@ -3,6 +3,7 @@
  * Handles auth flow, dashboard, and user editor proxying.
  */
 
+import { readFile } from 'node:fs/promises';
 import { Router } from 'express';
 import { authService } from '../service-client.js';
 import { onUserLogin, onUserLogout, getEditorInfo } from '../user-lifecycle.js';
@@ -13,6 +14,76 @@ const DOMAIN = process.env.DOMAIN || 'markco.dev';
 const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID;
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const IS_LOCAL_DOMAIN = /^(\d|localhost)/.test(DOMAIN);
+
+const SANDBOX_AI_UPSTREAM = (
+  process.env.SANDBOX_AI_PROXY_TARGET
+  || process.env.SANDBOX_AI_URL
+  || process.env.MRMD_AI_URL
+  || 'http://127.0.0.1:51790'
+).replace(/\/$/, '');
+
+const SANDBOX_AI_FORWARD_HEADERS = new Set([
+  'content-type',
+  'accept',
+  'x-juice-level',
+  'x-reasoning-level',
+  'x-model-override',
+  'x-api-key-anthropic',
+  'x-api-key-openai',
+  'x-api-key-groq',
+  'x-api-key-gemini',
+  'x-api-key-openrouter',
+  'x-api-key-together_ai',
+  'x-api-key-fireworks_ai',
+  'x-api-key-azure',
+  'x-api-key-bedrock',
+  'x-api-key-vertex_ai',
+  'x-api-key-cohere',
+  'x-api-key-mistral',
+  'x-api-key-deepseek',
+  'x-api-key-ollama',
+]);
+
+const PWA_ICON_CANDIDATES = {
+  128: [
+    process.env.PWA_ICON_128_PATH,
+    '/opt/markco/editor-build/mrmd-electron/assets/icon-128.png',
+    '/opt/markco/static/static/assets/icon-128.png',
+    `${process.cwd()}/mrmd-electron/assets/icon-128.png`,
+  ].filter(Boolean),
+  256: [
+    process.env.PWA_ICON_256_PATH,
+    '/opt/markco/editor-build/mrmd-electron/assets/icon-256.png',
+    '/opt/markco/static/static/assets/icon-256.png',
+    `${process.cwd()}/mrmd-electron/assets/icon-256.png`,
+  ].filter(Boolean),
+  512: [
+    process.env.PWA_ICON_512_PATH,
+    '/opt/markco/editor-build/mrmd-electron/assets/icon-512.png',
+    '/opt/markco/static/static/assets/icon-512.png',
+    `${process.cwd()}/mrmd-electron/assets/icon-512.png`,
+  ].filter(Boolean),
+};
+
+const FAVICON_CANDIDATES = [
+  process.env.FAVICON_PATH,
+  '/opt/markco/editor-build/mrmd-server/static/favicon.png',
+  '/opt/markco/static/static/favicon.png',
+  `${process.cwd()}/mrmd-server/static/favicon.png`,
+  `${process.cwd()}/mrmd-electron/assets/icon-128.png`,
+].filter(Boolean);
+
+const ANALYTICS_SCRIPT_SRC = process.env.ANALYTICS_SCRIPT_SRC || '';
+const ANALYTICS_WEBSITE_ID = process.env.ANALYTICS_WEBSITE_ID || '';
+
+const ANDROID_APP_PACKAGE = (process.env.ANDROID_APP_PACKAGE || '').trim();
+const ANDROID_APP_SHA256_CERT_FINGERPRINTS = (process.env.ANDROID_APP_SHA256_CERT_FINGERPRINTS
+  || process.env.ANDROID_APP_SHA256_CERT_FINGERPRINT
+  || '')
+  .split(',')
+  .map((value) => value.trim())
+  .filter(Boolean);
+const ANDROID_ASSETLINKS_JSON = process.env.ANDROID_ASSETLINKS_JSON || '';
 
 function extractToken(req) {
   return req.query.token
@@ -65,6 +136,238 @@ function escapeHtml(value) {
     .replaceAll("'", '&#39;');
 }
 
+function pwaHeadTags() {
+  return `
+  <meta name="theme-color" content="#1e1e1e" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="icon" href="/favicon.ico" />
+  <link rel="apple-touch-icon" href="/pwa/icon-256.png" />
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/sw.js').catch((err) => {
+          console.warn('[pwa] Service worker registration failed', err);
+        });
+      });
+    }
+  </script>`;
+}
+
+function pwaServiceWorkerSource() {
+  return `const CACHE_NAME = 'markco-pwa-v1';
+const PRECACHE = ['/offline', '/manifest.webmanifest', '/pwa/icon-128.png', '/pwa/icon-256.png', '/pwa/icon-512.png', '/favicon.ico'];
+const BYPASS_PREFIXES = ['/api/', '/auth/', '/hooks/', '/join/', '/projects/', '/u/'];
+const BYPASS_PATHS = new Set(['/login', '/dashboard', '/logout', '/api/logout']);
+
+self.addEventListener('install', (event) => {
+  event.waitUntil((async () => {
+    const cache = await caches.open(CACHE_NAME);
+    await cache.addAll(PRECACHE);
+    await self.skipWaiting();
+  })());
+});
+
+self.addEventListener('activate', (event) => {
+  event.waitUntil((async () => {
+    const keys = await caches.keys();
+    await Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key)));
+    await self.clients.claim();
+  })());
+});
+
+function shouldBypass(pathname) {
+  if (BYPASS_PATHS.has(pathname)) return true;
+  return BYPASS_PREFIXES.some((prefix) => pathname.startsWith(prefix));
+}
+
+self.addEventListener('fetch', (event) => {
+  const req = event.request;
+  if (req.method !== 'GET') return;
+
+  const url = new URL(req.url);
+  if (url.origin !== self.location.origin) return;
+  if (shouldBypass(url.pathname)) return;
+
+  if (req.mode === 'navigate') {
+    event.respondWith((async () => {
+      try {
+        return await fetch(req);
+      } catch {
+        return (await caches.match('/offline')) || new Response('Offline', {
+          status: 503,
+          headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+        });
+      }
+    })());
+    return;
+  }
+
+  if (url.pathname.startsWith('/static/') || url.pathname.startsWith('/pwa/') || url.pathname === '/favicon.ico') {
+    event.respondWith((async () => {
+      const cache = await caches.open(CACHE_NAME);
+      const cached = await cache.match(req);
+
+      const networkPromise = fetch(req)
+        .then((resp) => {
+          if (resp && resp.ok) cache.put(req, resp.clone());
+          return resp;
+        })
+        .catch(() => null);
+
+      if (cached) {
+        networkPromise.catch(() => {});
+        return cached;
+      }
+
+      return (await networkPromise) || new Response('', { status: 504 });
+    })());
+  }
+});`;
+}
+
+function analyticsScriptTag() {
+  if (!ANALYTICS_SCRIPT_SRC) return '';
+
+  const websiteAttr = ANALYTICS_WEBSITE_ID
+    ? ` data-website-id="${ANALYTICS_WEBSITE_ID}"`
+    : '';
+
+  return `<script defer src="${ANALYTICS_SCRIPT_SRC}"${websiteAttr}></script>`;
+}
+
+function injectPwaAndAnalyticsIntoHtml(html) {
+  if (!html || !html.includes('</head>')) return html;
+
+  const chunks = [];
+
+  if (!html.includes('href="/manifest.webmanifest"')) {
+    chunks.push(pwaHeadTags());
+  }
+
+  const analytics = analyticsScriptTag();
+  if (analytics && !html.includes(`src="${ANALYTICS_SCRIPT_SRC}"`)) {
+    chunks.push(analytics);
+  }
+
+  if (chunks.length === 0) return html;
+
+  return html.replace('</head>', `  ${chunks.join('\n  ')}\n</head>`);
+}
+
+function buildAssetLinksPayload() {
+  if (ANDROID_ASSETLINKS_JSON) {
+    try {
+      const parsed = JSON.parse(ANDROID_ASSETLINKS_JSON);
+      if (Array.isArray(parsed)) return parsed;
+      console.warn('[assetlinks] ANDROID_ASSETLINKS_JSON must be a JSON array');
+    } catch (err) {
+      console.warn('[assetlinks] Failed to parse ANDROID_ASSETLINKS_JSON:', err.message);
+    }
+  }
+
+  if (!ANDROID_APP_PACKAGE || ANDROID_APP_SHA256_CERT_FINGERPRINTS.length === 0) {
+    return [];
+  }
+
+  return [{
+    relation: ['delegate_permission/common.handle_all_urls'],
+    target: {
+      namespace: 'android_app',
+      package_name: ANDROID_APP_PACKAGE,
+      sha256_cert_fingerprints: ANDROID_APP_SHA256_CERT_FINGERPRINTS,
+    },
+  }];
+}
+
+async function sendPwaIcon(res, size) {
+  const candidates = PWA_ICON_CANDIDATES[size] || [];
+
+  for (const iconPath of candidates) {
+    try {
+      const data = await readFile(iconPath);
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      return res.type('png').send(data);
+    } catch {
+      // try next
+    }
+  }
+
+  return res.status(404).send(`PWA icon ${size} not found`);
+}
+
+async function sendFavicon(res) {
+  for (const iconPath of FAVICON_CANDIDATES) {
+    try {
+      const data = await readFile(iconPath);
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      return res.type('png').send(data);
+    } catch {
+      // try next
+    }
+  }
+
+  return sendPwaIcon(res, 128);
+}
+
+function buildSandboxAiHeaders(req) {
+  const headers = {
+    'Content-Type': req.headers['content-type'] || 'application/json',
+    Accept: req.headers.accept || '*/*',
+  };
+
+  for (const [key, value] of Object.entries(req.headers)) {
+    const lower = key.toLowerCase();
+    if (SANDBOX_AI_FORWARD_HEADERS.has(lower) && value != null) {
+      headers[key] = value;
+    }
+  }
+
+  return headers;
+}
+
+async function proxySandboxAi(req, res, upstreamPath) {
+  const targetUrl = `${SANDBOX_AI_UPSTREAM}${upstreamPath}`;
+
+  try {
+    const response = await fetch(targetUrl, {
+      method: req.method,
+      headers: buildSandboxAiHeaders(req),
+      body: ['GET', 'HEAD'].includes(req.method)
+        ? undefined
+        : JSON.stringify(req.body || {}),
+      signal: AbortSignal.timeout(180000),
+    });
+
+    res.status(response.status);
+    response.headers.forEach((value, key) => {
+      const lower = key.toLowerCase();
+      if (!['content-length', 'transfer-encoding', 'content-encoding', 'connection'].includes(lower)) {
+        res.setHeader(key, value);
+      }
+    });
+
+    if (!response.body) {
+      return res.end();
+    }
+
+    const reader = response.body.getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      res.write(Buffer.from(value));
+    }
+    return res.end();
+  } catch (err) {
+    console.error(`[sandbox-ai] Proxy error for ${targetUrl}:`, err.message);
+    return res.status(502).json({
+      error: 'AI proxy unavailable',
+      detail: err.message,
+    });
+  }
+}
+
 async function requireAuth(req, res, next) {
   const token = extractToken(req);
   if (!token) {
@@ -82,6 +385,14 @@ async function requireAuth(req, res, next) {
       res.cookie('session_token', token, sessionCookieOptions({
         maxAge: 30 * 24 * 60 * 60 * 1000,
       }));
+    }
+
+    // Clean token from URL once cookie is set (avoids weird/shareable token URLs)
+    if (req.query.token && htmlMode(req)) {
+      const clean = new URL(req.originalUrl, `${appProtocol()}://${DOMAIN}`);
+      clean.searchParams.delete('token');
+      const nextUrl = `${clean.pathname}${clean.search}` || '/';
+      return res.redirect(nextUrl);
     }
 
     next();
@@ -104,6 +415,8 @@ function renderPage(title, body, { landing = false } = {}) {
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>${title}</title>
   <meta name="color-scheme" content="dark light" />
+  ${pwaHeadTags()}
+  ${analyticsScriptTag()}
   <style>
     /* ── Dark (default / midnight) ─────────────────────────── */
     :root {
@@ -279,6 +592,19 @@ function renderPage(title, body, { landing = false } = {}) {
     .page-card p { color: var(--muted); }
     .page-card .stack { display: grid; gap: 10px; margin-top: 24px; }
     .page-card .row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 18px; }
+    .page-card .divider { display: flex; align-items: center; gap: 12px; margin: 20px 0 4px; color: var(--muted); font-size: 13px; }
+    .page-card .divider::before, .page-card .divider::after { content: ''; flex: 1; border-top: 1px solid var(--border); }
+    .page-card .email-form { display: grid; gap: 10px; margin-top: 12px; }
+    .page-card .input {
+      padding: 10px 14px;
+      font-size: 15px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--bg);
+      color: var(--text-bright);
+      outline: none;
+    }
+    .page-card .input:focus { border-color: var(--muted); }
     .page-card .meta {
       margin-top: 20px;
       padding-top: 16px;
@@ -498,6 +824,80 @@ async function completeLogin(res, user, token, expiresAt) {
   res.redirect('/dashboard');
 }
 
+// ── PWA assets/routes ─────────────────────────────────────────────────
+router.get('/manifest.webmanifest', (_req, res) => {
+  const manifest = {
+    id: '/',
+    name: 'MarkCo',
+    short_name: 'MarkCo',
+    description: 'Markdown notebooks with code, collaboration, and publishing.',
+    start_url: '/?source=pwa',
+    scope: '/',
+    display: 'standalone',
+    orientation: 'any',
+    theme_color: '#1e1e1e',
+    background_color: '#1e1e1e',
+    icons: [
+      { src: '/pwa/icon-128.png', sizes: '128x128', type: 'image/png' },
+      { src: '/pwa/icon-256.png', sizes: '256x256', type: 'image/png' },
+      { src: '/pwa/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any maskable' },
+    ],
+    shortcuts: [
+      { name: 'Open Sandbox', short_name: 'Sandbox', url: '/sandbox', icons: [{ src: '/pwa/icon-128.png', sizes: '128x128' }] },
+      { name: 'Login', short_name: 'Login', url: '/login', icons: [{ src: '/pwa/icon-128.png', sizes: '128x128' }] },
+    ],
+  };
+
+  if (ANDROID_APP_PACKAGE) {
+    manifest.related_applications = [{
+      platform: 'play',
+      id: ANDROID_APP_PACKAGE,
+    }];
+    manifest.prefer_related_applications = false;
+  }
+
+  res.setHeader('Cache-Control', 'no-cache');
+  return res.type('application/manifest+json').send(JSON.stringify(manifest, null, 2));
+});
+
+router.get('/.well-known/assetlinks.json', (_req, res) => {
+  const payload = buildAssetLinksPayload();
+  res.setHeader('Cache-Control', 'no-cache');
+  return res.type('application/json').send(JSON.stringify(payload, null, 2));
+});
+
+router.get('/assetlinks.json', (_req, res) => {
+  const payload = buildAssetLinksPayload();
+  res.setHeader('Cache-Control', 'no-cache');
+  return res.type('application/json').send(JSON.stringify(payload, null, 2));
+});
+
+router.get('/sw.js', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.setHeader('Service-Worker-Allowed', '/');
+  return res.type('application/javascript').send(pwaServiceWorkerSource());
+});
+
+router.get('/offline', (_req, res) => {
+  const body = `<div class="page-card"><main class="card">
+    <h1>You're offline</h1>
+    <p>markco.dev needs a network connection for sign-in and cloud execution.</p>
+    <p>You can still reopen this page when your connection is back.</p>
+    <div class="row" style="margin-top:20px">
+      <a class="btn primary" href="/sandbox">Open Sandbox</a>
+      <a class="btn ghost" href="/">Back to home</a>
+    </div>
+  </main></div>`;
+
+  res.setHeader('Cache-Control', 'no-store');
+  return res.send(renderPage('markco.dev — Offline', body));
+});
+
+router.get('/favicon.ico', async (_req, res) => sendFavicon(res));
+router.get('/pwa/icon-128.png', async (_req, res) => sendPwaIcon(res, 128));
+router.get('/pwa/icon-256.png', async (_req, res) => sendPwaIcon(res, 256));
+router.get('/pwa/icon-512.png', async (_req, res) => sendPwaIcon(res, 512));
+
 // ── GET / ─────────────────────────────────────────────────────────────
 router.get('/', async (req, res) => {
   // If already logged in, go straight to dashboard
@@ -653,8 +1053,14 @@ router.get('/login', async (req, res) => {
     <div class="stack">
       <a class="btn primary ${githubEnabled ? '' : 'disabled'}" href="${githubEnabled ? '/login/github' : '#'}">Continue with GitHub</a>
       <a class="btn ${googleEnabled ? '' : 'disabled'}" href="${googleEnabled ? '/login/google' : '#'}">Continue with Google ${googleEnabled ? '' : '<span class="pill">soon</span>'}</a>
-      <button class="btn disabled" type="button">Continue with Email Link <span class="pill">soon</span></button>
     </div>
+
+    <div class="divider"><span>or</span></div>
+
+    <form class="email-form" action="/login/email" method="POST">
+      <input type="email" name="email" placeholder="you@example.com" required autocomplete="email" class="input" />
+      <button type="submit" class="btn">Send login link</button>
+    </form>
 
     <div class="row">
       <a class="btn ghost" href="/sandbox">Try without an account</a>
@@ -708,6 +1114,47 @@ router.get('/auth/callback/google', async (req, res) => {
   } catch (err) {
     console.error('[callback/google] OAuth error:', err.message);
     return res.redirect('/login?error=google_oauth_failed');
+  }
+});
+
+// ── POST /login/email ─────────────────────────────────────────────────
+router.post('/login/email', async (req, res) => {
+  const { email } = req.body;
+  if (!email) {
+    return res.redirect('/login?error=missing_email');
+  }
+
+  try {
+    await authService.sendMagicLink(email);
+  } catch (err) {
+    console.error('[login/email] Error:', err.message);
+    const detail = err.data?.error || 'email_send_failed';
+    return res.redirect(`/login?error=${encodeURIComponent(detail)}`);
+  }
+
+  const safeEmail = escapeHtml(email);
+  const body = `<div class="page-card"><main class="card">
+    <h1>Check your inbox</h1>
+    <p>We sent a login link to <strong>${safeEmail}</strong>.</p>
+    <p>Click the link in the email to sign in. It expires in 15 minutes.</p>
+    <p class="meta" style="margin-top:24px">Didn't get it? Check your spam folder or <a href="/login">try again</a>.</p>
+  </main></div>`;
+  return res.send(renderPage('markco.dev — Check your email', body));
+});
+
+// ── GET /auth/email/verify ────────────────────────────────────────────
+router.get('/auth/email/verify', async (req, res) => {
+  const { token } = req.query;
+  if (!token) {
+    return res.redirect('/login?error=missing_token');
+  }
+
+  try {
+    const { user, token: sessionToken, expires_at: expiresAt } = await authService.verifyMagicLink(token);
+    return await completeLogin(res, user, sessionToken, expiresAt);
+  } catch (err) {
+    console.error('[auth/email/verify] Error:', err.message);
+    return res.redirect('/login?error=invalid_or_expired_link');
   }
 });
 
@@ -822,13 +1269,126 @@ async function handleLogout(req, res) {
 router.post('/logout', handleLogout);
 router.post('/api/logout', handleLogout);
 
+// ── Sandbox AI proxy (guest mode, BYO API keys) ──────────────────────
+const SANDBOX_KEY_TEST_URLS = {
+  anthropic: 'https://api.anthropic.com/v1/models',
+  openai: 'https://api.openai.com/v1/models',
+  groq: 'https://api.groq.com/openai/v1/models',
+  gemini: 'https://generativelanguage.googleapis.com/v1/models',
+  openrouter: 'https://openrouter.ai/api/v1/models',
+};
+
+router.get('/api/ai/key-test/:provider', async (req, res) => {
+  const provider = String(req.params.provider || '').toLowerCase();
+  const baseUrl = SANDBOX_KEY_TEST_URLS[provider];
+
+  console.log(`[key-test] provider=${provider} hasAuth=${!!req.headers.authorization} hasXApiKey=${!!req.headers['x-api-key']} hasQueryKey=${!!req.query.key}`);
+
+  if (!baseUrl) {
+    return res.status(400).json({ error: `Unsupported provider: ${provider}` });
+  }
+
+  let targetUrl = baseUrl;
+  const headers = {
+    Accept: 'application/json',
+  };
+
+  if (provider === 'gemini') {
+    const key = req.query.key;
+    if (!key) {
+      return res.status(400).json({ error: 'Missing Gemini API key' });
+    }
+    targetUrl = `${baseUrl}?key=${encodeURIComponent(String(key))}`;
+  } else if (provider === 'anthropic') {
+    const apiKey = req.headers['x-api-key'];
+    if (!apiKey) {
+      return res.status(400).json({ error: 'Missing Anthropic API key header' });
+    }
+    headers['x-api-key'] = apiKey;
+    headers['anthropic-version'] = req.headers['anthropic-version'] || '2023-06-01';
+  } else {
+    const auth = req.headers.authorization;
+    if (!auth) {
+      return res.status(400).json({ error: 'Missing Authorization header' });
+    }
+    headers.Authorization = auth;
+  }
+
+  try {
+    const upstream = await fetch(targetUrl, {
+      method: 'GET',
+      headers,
+      signal: AbortSignal.timeout(15000),
+    });
+
+    const body = await upstream.text();
+    console.log(`[key-test] provider=${provider} upstream=${upstream.status} bodyLen=${body?.length}`);
+    res.status(upstream.status);
+    res.setHeader('Content-Type', upstream.headers.get('content-type') || 'application/json');
+    return res.send(body || JSON.stringify({ ok: upstream.ok, status: upstream.status }));
+  } catch (err) {
+    console.error(`[key-test] provider=${provider} error: ${err.message}`);
+    return res.status(502).json({ error: 'Provider test failed', detail: err.message });
+  }
+});
+
+router.get('/api/ai/status', async (_req, res) => {
+  try {
+    const ping = await fetch(`${SANDBOX_AI_UPSTREAM}/programs`, {
+      signal: AbortSignal.timeout(5000),
+    });
+
+    return res.status(ping.ok ? 200 : 503).json({
+      url: '/api/ai/proxy',
+      managed: false,
+      running: ping.ok,
+      default_juice_level: 0,
+      mode: 'sandbox-proxy',
+    });
+  } catch {
+    return res.status(503).json({
+      url: '/api/ai/proxy',
+      managed: false,
+      running: false,
+      default_juice_level: 0,
+      mode: 'sandbox-proxy',
+      error: 'upstream unavailable',
+    });
+  }
+});
+
+router.get('/api/ai/programs', async (req, res) => {
+  return proxySandboxAi(req, res, '/programs');
+});
+
+router.all('/api/ai/proxy', async (_req, res) => {
+  return res.json({
+    ok: true,
+    mode: 'sandbox-proxy',
+  });
+});
+
+router.all('/api/ai/proxy/*', async (req, res) => {
+  const path = `/${req.params[0] || ''}`;
+  const query = req.originalUrl.includes('?')
+    ? req.originalUrl.slice(req.originalUrl.indexOf('?'))
+    : '';
+  return proxySandboxAi(req, res, `${path}${query}`);
+});
+
+// Optional compatibility with AiClient(/api/ai/:program)
+router.post('/api/ai/:program', async (req, res) => {
+  return proxySandboxAi(req, res, `/${req.params.program}`);
+});
+
+router.post('/api/ai/:program/stream', async (req, res) => {
+  return proxySandboxAi(req, res, `/${req.params.program}/stream`);
+});
+
 // ── GET /sandbox (guest local mode, no auth) ─────────────────────────
 // Serves the real mrmd editor index.html with browser-shim.js + sandbox-bridge.js
 // instead of http-shim.js + sync server. Same app, different backend.
 router.get('/sandbox', async (_req, res) => {
-  const { readFile } = await import('node:fs/promises');
-  const { join } = await import('node:path');
-
   // Read the canonical editor index.html
   const editorHtmlPath = process.env.EDITOR_HTML_PATH
     || '/opt/markco/editor-build/mrmd-electron/index.html';
@@ -869,7 +1429,7 @@ router.get('/sandbox', async (_req, res) => {
   html = html.replace(
     '<script src="/static/mrmd.iife.js"></script>',
     `<!-- Sandbox shim: IndexedDB-backed electronAPI -->
-  <script src="/static/browser-shim.js"></script>
+  <script src="/static/browser-shim.js?v=${Date.now()}"></script>
 
   <script src="/static/mrmd.iife.js"></script>
 
@@ -878,11 +1438,279 @@ router.get('/sandbox', async (_req, res) => {
   <script src="/static/webr-runtime.js"></script>
 
   <!-- Sandbox bridge: patches mrmd.drive() for local editing, registers runtimes -->
-  <script src="/static/sandbox-bridge.js"></script>`
+  <script src="/static/sandbox-bridge.js?v=${Date.now()}"></script>
+
+  <!-- Sandbox AI fallback: re-connect AI client if initial hook races -->
+  <script>
+    (() => {
+      if (!window.MRMD_SANDBOX) return;
+
+      const ensureSandboxAiConnected = async () => {
+        try {
+          if (typeof connectAiServer !== 'function') return;
+          const ai = await window.electronAPI?.getAi?.();
+          if (ai?.success && ai.port) {
+            connectAiServer('http://127.0.0.1:' + ai.port);
+            if (typeof updateAiStatus === 'function') updateAiStatus('ready');
+          }
+        } catch (err) {
+          console.warn('[sandbox-ai] reconnect failed:', err?.message || err);
+        }
+      };
+
+      window.addEventListener('DOMContentLoaded', () => setTimeout(ensureSandboxAiConnected, 300));
+      window.addEventListener('load', () => setTimeout(ensureSandboxAiConnected, 1200));
+      window.addEventListener('focus', () => setTimeout(ensureSandboxAiConnected, 100));
+      window.addEventListener('mrmd:sandbox-settings-changed', () => setTimeout(ensureSandboxAiConnected, 50));
+    })();
+  </script>`
   );
 
   // 6. Update page title
   html = html.replace(/<title>mrmd<\/title>/, '<title>markco.dev — Sandbox</title>');
+
+  // 6b. Inject sandbox sign-in CTA (replaces cloud account avatar in logged-in mode)
+  html = html.replace(
+    '</head>',
+    `<!-- [sandbox] Sign-in CTA -->
+<style>
+  /* ── Shift search+AI buttons left to make room for CTA ── */
+  .titlebar-mobile-actions {
+    right: 140px !important;
+  }
+
+  /* ── Desktop: pill button in titlebar ── */
+  .sandbox-cta {
+    position: absolute;
+    right: 48px;
+    top: 50%;
+    transform: translateY(-50%);
+    -webkit-app-region: no-drag;
+    z-index: 100;
+  }
+  .sandbox-cta-btn {
+    height: 26px;
+    border-radius: 13px;
+    border: 1.5px solid var(--accent, #58a6ff);
+    cursor: pointer;
+    background: transparent;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 0 10px;
+    transition: background 0.15s, border-color 0.15s;
+    font-family: inherit;
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--accent, #58a6ff);
+    white-space: nowrap;
+    letter-spacing: 0.2px;
+  }
+  .sandbox-cta-btn:hover {
+    background: var(--accent, #58a6ff);
+    color: var(--bg, #0d1117);
+  }
+  .sandbox-cta-btn svg { flex-shrink: 0; }
+  .sandbox-cta-label { /* text beside icon */ }
+
+  /* ── Dropdown panel ── */
+  .sandbox-cta-dropdown {
+    display: none;
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    background: var(--bg-secondary, #161b22);
+    border: 1px solid var(--border, #30363d);
+    border-radius: 10px;
+    padding: 0;
+    width: 280px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    z-index: 1000;
+    overflow: hidden;
+  }
+  .sandbox-cta-dropdown.open { display: block; }
+  .sandbox-cta-header {
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border, #30363d);
+  }
+  .sandbox-cta-current {
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .sandbox-cta-badge {
+    display: inline-block;
+    font-size: 10px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.6px;
+    color: var(--accent, #58a6ff);
+    background: rgba(88, 166, 255, 0.1);
+    border: 1px solid rgba(88, 166, 255, 0.2);
+    border-radius: 4px;
+    padding: 2px 7px;
+    width: fit-content;
+  }
+  .sandbox-cta-current p {
+    margin: 0; font-size: 12px; line-height: 1.5;
+    color: var(--text-muted, #8b949e);
+  }
+  .sandbox-cta-upgrade {
+    padding: 12px 16px 10px;
+    border-bottom: 1px solid var(--border, #30363d);
+  }
+  .sandbox-cta-upgrade h3 {
+    margin: 0 0 8px; font-size: 13px; font-weight: 600;
+    color: var(--text, #c9d1d9);
+  }
+  .sandbox-cta-features {
+    list-style: none; margin: 0; padding: 0;
+  }
+  .sandbox-cta-features li {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 12px; color: var(--text-muted, #8b949e); padding: 3px 0;
+  }
+  .sandbox-cta-features li svg {
+    flex-shrink: 0; color: var(--success, #3fb950);
+  }
+  .sandbox-cta-actions {
+    padding: 12px 16px; display: flex; flex-direction: column; gap: 6px;
+    align-items: center;
+  }
+  .sandbox-cta-actions a {
+    display: block; text-align: center; padding: 10px 0; border-radius: 8px;
+    font-size: 14px; font-weight: 600; text-decoration: none;
+    font-family: inherit; transition: opacity 0.15s;
+    width: 100%;
+  }
+  .sandbox-cta-actions a:hover { opacity: 0.85; }
+  .sandbox-cta-actions .primary-action {
+    background: var(--accent, #58a6ff); color: var(--bg, #0d1117);
+  }
+  .sandbox-cta-free {
+    font-size: 11px; color: var(--text-dim, #6e7681);
+    font-weight: 400;
+  }
+
+  /* ── Mobile: icon-only circle, lives inside titlebar flex flow ── */
+  @media (max-width: 768px) {
+    /* Reset the desktop shift — mobile layout is flex-based */
+    .titlebar-mobile-actions {
+      right: auto !important;
+      position: static !important;
+      transform: none !important;
+    }
+    .sandbox-cta {
+      position: static;
+      transform: none;
+      flex-shrink: 0;
+      order: 10;
+    }
+    .sandbox-cta-btn {
+      width: 34px; height: 34px;
+      border-radius: 50%;
+      padding: 0;
+      justify-content: center;
+      border-width: 1.5px;
+    }
+    .sandbox-cta-label { display: none; }
+    .sandbox-cta-dropdown {
+      position: fixed;
+      top: auto;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      width: 100%;
+      max-width: 100%;
+      border-radius: 16px 16px 0 0;
+      border: none;
+      border-top: 1px solid var(--border, #30363d);
+      box-shadow: none;
+      padding-bottom: env(safe-area-inset-bottom, 0px);
+    }
+    .sandbox-cta-dropdown.open {
+      animation: sandbox-slide-up 0.25s cubic-bezier(0.2, 0, 0, 1);
+    }
+    @keyframes sandbox-slide-up {
+      from { transform: translateY(100%); opacity: 0.8; }
+      to { transform: translateY(0); opacity: 1; }
+    }
+    .sandbox-cta-header { padding: 20px 20px 14px; }
+    .sandbox-cta-current p { font-size: 13px; }
+    .sandbox-cta-upgrade { padding: 14px 20px 12px; }
+    .sandbox-cta-upgrade h3 { font-size: 14px; }
+    .sandbox-cta-features li { font-size: 13px; padding: 4px 0; }
+    .sandbox-cta-actions { padding: 14px 20px 16px; }
+    .sandbox-cta-actions a {
+      padding: 14px 0; border-radius: 12px; font-size: 16px;
+      min-height: 48px;
+    }
+  }
+</style>
+<script>
+(function() {
+  var checkSvg = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 8.5l4 4 8-9"/></svg>';
+
+  function initSandboxCta() {
+    var titlebar = document.querySelector('.titlebar');
+    if (!titlebar) return;
+
+    var c = document.createElement('div');
+    c.className = 'sandbox-cta';
+
+    var noteSvg = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6.5"/><path d="M8 5v3.5M8 10.5v.5"/></svg>';
+
+    c.innerHTML =
+      '<button class="sandbox-cta-btn" title="Sign in to markco.dev">' +
+        '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a8 8 0 110 16A8 8 0 018 0zm0 1.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13zM8 3a2.5 2.5 0 110 5 2.5 2.5 0 010-5zm0 6.5c2.5 0 4.5 1.2 4.5 2.5v.5h-9v-.5c0-1.3 2-2.5 4.5-2.5z"/></svg>' +
+        '<span class="sandbox-cta-label">Sign in</span>' +
+      '</button>' +
+      '<div class="sandbox-cta-dropdown">' +
+        '<div class="sandbox-cta-header">' +
+          '<div class="sandbox-cta-current">' +
+            '<span class="sandbox-cta-badge">Sandbox</span>' +
+            '<p>Your work is saved in this browser\u2019s local storage. It stays here as long as you don\u2019t clear your browser data.</p>' +
+          '</div>' +
+        '</div>' +
+        '<div class="sandbox-cta-upgrade">' +
+          '<h3>Sign in for more</h3>' +
+          '<ul class="sandbox-cta-features">' +
+            '<li>' + checkSvg + 'Cloud sync across all your devices</li>' +
+            '<li>' + checkSvg + 'Bash, terminal &amp; Julia runtimes</li>' +
+            '<li>' + checkSvg + 'Real-time collaboration</li>' +
+            '<li>' + checkSvg + 'Publish notebooks to the web</li>' +
+          '</ul>' +
+        '</div>' +
+        '<div class="sandbox-cta-actions">' +
+          '<a href="/login" class="primary-action">Sign in / Sign up</a>' +
+          '<span class="sandbox-cta-free">Free \u2014 no credit card</span>' +
+        '</div>' +
+      '</div>';
+
+    titlebar.appendChild(c);
+
+    var btn = c.querySelector('.sandbox-cta-btn');
+    var dropdown = c.querySelector('.sandbox-cta-dropdown');
+
+    btn.addEventListener('click', function(e) {
+      e.stopPropagation();
+      dropdown.classList.toggle('open');
+    });
+
+    document.addEventListener('click', function() {
+      dropdown.classList.remove('open');
+    });
+
+    dropdown.addEventListener('click', function(e) {
+      e.stopPropagation();
+    });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initSandboxCta);
+  } else {
+    setTimeout(initSandboxCta, 300);
+  }
+})();
+</script>
+</head>`
+  );
 
   // 7. Inject sandbox auto-open: open welcome.md instead of showing file picker
   //    This replaces the setTimeout(showFilePicker, 100) at the end of init()
@@ -896,6 +1724,10 @@ router.get('/sandbox', async (_req, res) => {
       }`
   );
 
+  // Inject PWA tags + optional analytics
+  html = injectPwaAndAnalyticsIntoHtml(html);
+
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   return res.type('html').send(html);
 });
 
@@ -972,13 +1804,20 @@ router.use('/u/:userId', requireAuth, async (req, res) => {
 
     res.status(proxyRes.status);
     proxyRes.headers.forEach((value, key) => {
-      if (!['content-encoding', 'transfer-encoding'].includes(key.toLowerCase())) {
+      if (!['content-encoding', 'transfer-encoding', 'content-length'].includes(key.toLowerCase())) {
         res.setHeader(key, value);
       }
     });
 
-    const body = await proxyRes.arrayBuffer();
-    res.send(Buffer.from(body));
+    const contentType = (proxyRes.headers.get('content-type') || '').toLowerCase();
+    const buffer = Buffer.from(await proxyRes.arrayBuffer());
+
+    if (contentType.includes('text/html')) {
+      const html = injectPwaAndAnalyticsIntoHtml(buffer.toString('utf8'));
+      return res.type('html').send(html);
+    }
+
+    return res.send(buffer);
   } catch (err) {
     console.error(`[proxy] Error proxying to ${targetUrl}: ${err.message}`);
     res.status(502).send('Editor proxy error');
