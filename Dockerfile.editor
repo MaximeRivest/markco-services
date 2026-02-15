@@ -4,7 +4,7 @@ FROM node:22-slim
 RUN apt-get update && apt-get install -y \
     python3 python3-venv python3-pip \
     r-base r-base-dev \
-    bash curl git procps wget gpg \
+    bash curl git procps wget gpg sudo \
     && rm -rf /var/lib/apt/lists/*
 
 # R packages (rarely changes)
@@ -59,8 +59,16 @@ RUN npm install --production
 # Fix ownership for everything
 RUN chown -R node:node /app
 
-USER node
-WORKDIR /home/node
+# Make the container feel like a normal Ubuntu user environment.
+# Rename default "node" user (uid 1000) -> "ubuntu" and grant passwordless sudo.
+RUN usermod -l ubuntu -d /home/ubuntu -m node \
+    && groupmod -n ubuntu node \
+    && usermod -aG sudo ubuntu \
+    && echo 'ubuntu ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/ubuntu \
+    && chmod 0440 /etc/sudoers.d/ubuntu
+
+USER ubuntu
+WORKDIR /home/ubuntu
 EXPOSE 8080
 
 CMD ["node", "/app/mrmd-server/bin/cli.js", "--port", "8080", "--host", "0.0.0.0", "--no-auth"]

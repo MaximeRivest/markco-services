@@ -33,10 +33,11 @@ async function run(command, args, host) {
  * @param {string} [opts.host] - target host
  * @returns {Promise<{containerId: string}>}
  */
-export async function startContainer({ name, image, memoryLimit, cpuLimit, port, host }) {
+export async function startContainer({ name, image, memoryLimit, cpuLimit, port, host, volumeMount }) {
   const args = [
     'run', '-d',
     '--name', name,
+    '--restart=on-failure:5',
     '--runtime', 'runc',
     '--security-opt', 'apparmor=unconfined',
     '--memory', String(memoryLimit || 268435456),
@@ -44,6 +45,10 @@ export async function startContainer({ name, image, memoryLimit, cpuLimit, port,
   ];
   if (port) {
     args.push('-p', `${port}:8888`);
+  }
+  if (volumeMount) {
+    // :U asks Podman to map/chown volume ownership for the container user
+    args.push('-v', `${volumeMount}:U`);
   }
   args.push(image || 'localhost/mrmd-runtime:latest');
 

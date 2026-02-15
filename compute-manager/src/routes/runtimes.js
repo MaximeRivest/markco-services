@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { randomUUID } from 'node:crypto';
+import { mkdirSync } from 'node:fs';
 import { query } from '../db.js';
 import * as podman from '../podman.js';
 import { migrateRuntime, snapshotRuntime, restoreFromSnapshot, forkSandbox } from '../migration.js';
@@ -45,12 +46,19 @@ router.post('/', async (req, res, next) => {
     // Pick a random high port
     const port = 40000 + Math.floor(Math.random() * 20000);
 
+    // Mount user workspace into runtime so Python can access the same project files
+    const dataDir = process.env.DATA_DIR || '/data/users';
+    const runtimeHome = process.env.RUNTIME_HOME || '/home/ubuntu';
+    const userDir = `${dataDir}/${user_id}`;
+    mkdirSync(userDir, { recursive: true });
+
     await podman.startContainer({
       name: containerName,
       image: limits.image,
       memoryLimit: limits.memory,
       cpuLimit: limits.cpu,
       port,
+      volumeMount: `${userDir}:${runtimeHome}`,
     });
 
     const result = await query(
