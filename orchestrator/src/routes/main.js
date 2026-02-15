@@ -1525,10 +1525,20 @@ router.get('/sandbox', async (_req, res) => {
     padding: 0;
     width: 280px;
     box-shadow: 0 8px 24px rgba(0,0,0,0.4);
-    z-index: 1000;
+    z-index: 10000;
     overflow: hidden;
   }
   .sandbox-cta-dropdown.open { display: block; }
+
+  /* Scrim behind dropdown on mobile */
+  .sandbox-cta-scrim {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.4);
+    z-index: 9999;
+  }
+  .sandbox-cta-scrim.open { display: block; }
   .sandbox-cta-header {
     padding: 14px 16px;
     border-bottom: 1px solid var(--border, #30363d);
@@ -1622,25 +1632,48 @@ router.get('/sandbox', async (_req, res) => {
       border: none;
       border-top: 1px solid var(--border, #30363d);
       box-shadow: none;
+      z-index: 10000;
       padding-bottom: env(safe-area-inset-bottom, 0px);
     }
     .sandbox-cta-dropdown.open {
       animation: sandbox-slide-up 0.25s cubic-bezier(0.2, 0, 0, 1);
     }
     @keyframes sandbox-slide-up {
-      from { transform: translateY(100%); opacity: 0.8; }
-      to { transform: translateY(0); opacity: 1; }
+      from { transform: translateY(100%); }
+      to { transform: translateY(0); }
     }
-    .sandbox-cta-header { padding: 20px 20px 14px; }
-    .sandbox-cta-current p { font-size: 13px; }
+    .sandbox-cta-scrim.open {
+      display: block;
+      animation: sandbox-fade-in 0.2s ease;
+    }
+    @keyframes sandbox-fade-in {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+    .sandbox-cta-header {
+      padding: 20px 20px 14px;
+      position: relative;
+    }
+    /* Drag handle */
+    .sandbox-cta-header::before {
+      content: '';
+      position: absolute;
+      top: 8px; left: 50%; transform: translateX(-50%);
+      width: 36px; height: 4px;
+      background: var(--text-dim, #6e7681);
+      border-radius: 2px; opacity: 0.4;
+    }
+    .sandbox-cta-badge { margin-top: 4px; }
+    .sandbox-cta-current p { font-size: 14px; line-height: 1.5; }
     .sandbox-cta-upgrade { padding: 14px 20px 12px; }
-    .sandbox-cta-upgrade h3 { font-size: 14px; }
-    .sandbox-cta-features li { font-size: 13px; padding: 4px 0; }
-    .sandbox-cta-actions { padding: 14px 20px 16px; }
+    .sandbox-cta-upgrade h3 { font-size: 15px; }
+    .sandbox-cta-features li { font-size: 14px; padding: 5px 0; min-height: 32px; }
+    .sandbox-cta-actions { padding: 16px 20px 20px; }
     .sandbox-cta-actions a {
       padding: 14px 0; border-radius: 12px; font-size: 16px;
-      min-height: 48px;
+      min-height: 48px; display: flex; align-items: center; justify-content: center;
     }
+    .sandbox-cta-free { font-size: 12px; padding-top: 2px; }
   }
 </style>
 <script>
@@ -1683,18 +1716,38 @@ router.get('/sandbox', async (_req, res) => {
         '</div>' +
       '</div>';
 
+    // Add scrim element for mobile backdrop
+    var scrim = document.createElement('div');
+    scrim.className = 'sandbox-cta-scrim';
+    document.body.appendChild(scrim);
+
     titlebar.appendChild(c);
 
     var btn = c.querySelector('.sandbox-cta-btn');
     var dropdown = c.querySelector('.sandbox-cta-dropdown');
 
+    function openDropdown() {
+      dropdown.classList.add('open');
+      scrim.classList.add('open');
+    }
+    function closeDropdown() {
+      dropdown.classList.remove('open');
+      scrim.classList.remove('open');
+    }
+
     btn.addEventListener('click', function(e) {
       e.stopPropagation();
-      dropdown.classList.toggle('open');
+      if (dropdown.classList.contains('open')) {
+        closeDropdown();
+      } else {
+        openDropdown();
+      }
     });
 
-    document.addEventListener('click', function() {
-      dropdown.classList.remove('open');
+    scrim.addEventListener('click', closeDropdown);
+
+    document.addEventListener('click', function(e) {
+      if (!c.contains(e.target)) closeDropdown();
     });
 
     dropdown.addEventListener('click', function(e) {
