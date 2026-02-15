@@ -91,6 +91,7 @@ function ensureUserWorkspace(userId, user = {}) {
   writeIfMissing(`${userDir}/.npmrc`, 'prefix=/home/ubuntu/.npm-global\n');
   appendLineIfMissing(`${userDir}/.bashrc`, 'export PATH="$HOME/.npm-global/bin:$PATH"');
   appendLineIfMissing(`${userDir}/.profile`, 'export PATH="$HOME/.npm-global/bin:$PATH"');
+  appendLineIfMissing(`${userDir}/.bashrc`, 'apt() { sudo apt-get update && sudo apt-get "$@"; }');
   appendLineIfMissing(`${userDir}/.bashrc`, "alias apt-install='sudo apt-get update && sudo apt-get install -y'");
 
   writeIfMissing(`${scratchDir}/mrmd.md`, `# Scratch
