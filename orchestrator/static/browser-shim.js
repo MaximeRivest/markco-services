@@ -26,7 +26,73 @@
   const SETTINGS_KEY = 'markco.sandbox.settings';
   const RECENT_KEY = 'markco.sandbox.recent';
   const SEED_VERSION_KEY = 'markco.sandbox.seed-version';
-  const CURRENT_SEED_VERSION = 2; // Bump when DEFAULT_WELCOME_DOC changes
+  const CURRENT_SEED_VERSION = 3; // Bump when DEFAULT_WELCOME_DOC changes
+
+  const DEFAULT_SANDBOX_SETTINGS = {
+    version: 1,
+    apiKeys: {
+      anthropic: '',
+      openai: '',
+      groq: '',
+      gemini: '',
+      openrouter: '',
+    },
+    qualityLevels: {
+      1: { model: 'groq/moonshotai/kimi-k2-instruct-0905', reasoningDefault: 0, name: 'Quick' },
+      2: { model: 'anthropic/claude-sonnet-4-5', reasoningDefault: 1, name: 'Balanced' },
+      3: { model: 'gemini/gemini-3-pro-preview', reasoningDefault: 2, name: 'Deep' },
+      4: { model: 'anthropic/claude-opus-4-5', reasoningDefault: 3, name: 'Maximum' },
+      5: {
+        type: 'multi',
+        models: [
+          'openrouter/x-ai/grok-4',
+          'openai/gpt-5.2',
+          'gemini/gemini-3-pro-preview',
+          'anthropic/claude-opus-4-5',
+        ],
+        synthesizer: 'gemini/gemini-3-pro-preview',
+        name: 'Ultimate',
+      },
+    },
+    customSections: [],
+    defaults: {
+      juiceLevel: 2,
+      reasoningLevel: 1,
+    },
+  };
+
+  const API_PROVIDERS = {
+    anthropic: {
+      name: 'Anthropic',
+      keyPrefix: 'sk-ant-',
+      envVar: 'ANTHROPIC_API_KEY',
+      testEndpoint: '/api/ai/key-test/anthropic',
+    },
+    openai: {
+      name: 'OpenAI',
+      keyPrefix: 'sk-',
+      envVar: 'OPENAI_API_KEY',
+      testEndpoint: '/api/ai/key-test/openai',
+    },
+    groq: {
+      name: 'Groq',
+      keyPrefix: 'gsk_',
+      envVar: 'GROQ_API_KEY',
+      testEndpoint: '/api/ai/key-test/groq',
+    },
+    gemini: {
+      name: 'Google Gemini',
+      keyPrefix: '',
+      envVar: 'GEMINI_API_KEY',
+      testEndpoint: '/api/ai/key-test/gemini',
+    },
+    openrouter: {
+      name: 'OpenRouter',
+      keyPrefix: 'sk-or-',
+      envVar: 'OPENROUTER_API_KEY',
+      testEndpoint: '/api/ai/key-test/openrouter',
+    },
+  };
 
   // ========================================================================
   // IndexedDB Virtual Filesystem
@@ -249,18 +315,48 @@ summary(x)
 </div>
 \`\`\`
 
+## Paste an image (Ctrl/Cmd+V)
+
+1. Click in this file where you want the image
+2. Paste a screenshot or copied image
+3. The sandbox saves it into \`_assets/\` and inserts markdown automatically
+
+Try adding one below this line 👇
+
+## Generate a plot image in Python (matplotlib)
+
+\`\`\`python
+import numpy as np
+import matplotlib.pyplot as plt
+
+x = np.linspace(0, 2 * np.pi, 240)
+y = np.sin(x)
+
+plt.figure(figsize=(6, 3.2))
+plt.plot(x, y, linewidth=2)
+plt.title("Sandbox matplotlib demo")
+plt.xlabel("x")
+plt.ylabel("sin(x)")
+plt.grid(alpha=0.25)
+plt.tight_layout()
+plt.show()
+\`\`\`
+
+If this renders an image output, sandbox asset handling is working ✅
+
 ## What works here
 
 - **JavaScript** and **HTML** — instant, runs in browser
 - **Python** — via Pyodide (WebAssembly), with numpy/pandas/matplotlib
 - **R** — via WebR (WebAssembly), with base R packages
+- **AI commands** — bring your own API keys/models in Settings (LiteLLM model names)
 - **Files & folders** — saved in IndexedDB (this browser only)
 - **Themes** — use the theme picker in the bottom bar
 - **Navigation** — Cmd/Ctrl+P to open files, sidebar for project tree
 
 ## Want more?
 
-[Sign in](/) for Bash, Julia, terminal access, AI commands,
+[Sign in](/) for Bash, Julia, terminal access,
 collaboration, and cloud persistence.
 `;
 
@@ -382,17 +478,49 @@ collaboration, and cloud persistence.
   // ========================================================================
 
   const OriginalFetch = window.fetch;
+
+  function isAiLocalPath(pathname) {
+    if (!pathname) return false;
+    if (pathname === '/programs' || pathname === '/juice' || pathname === '/reasoning') return true;
+    if (pathname === '/api/custom-programs/register' || pathname === '/api/custom-programs') return true;
+    if (/^\/(?:[A-Za-z][A-Za-z0-9_]*Predict|Custom_[A-Za-z0-9_]+)(?:\/stream)?$/.test(pathname)) return true;
+    return false;
+  }
+
   window.fetch = function (input, init) {
-    let url = typeof input === 'string' ? input : input?.url;
-    // Block requests to localhost services — they don't exist in sandbox
-    const match = url && url.match(/^https?:\/\/(?:127\.0\.0\.1|localhost):(\d+)\//);
+    const url = typeof input === 'string' ? input : input?.url;
+    const match = url && url.match(/^https?:\/\/(?:127\.0\.0\.1|localhost):(\d+)(\/[^?#]*)?(\?[^#]*)?/);
+
     if (match) {
+      const pathname = match[2] || '/';
+      const search = match[3] || '';
+
+      // AI traffic is transparently proxied through orchestrator.
+      if (isAiLocalPath(pathname)) {
+        const proxied = `/api/ai/proxy${pathname}${search}`;
+        const aiInit = { ...(init || {}) };
+        const headers = new Headers(aiInit.headers || {});
+
+        // Always forward locally stored API keys so sandbox users can use
+        // any configured LiteLLM provider without server-side persistence.
+        const apiKeys = getSetting('apiKeys', {});
+        for (const [provider, key] of Object.entries(apiKeys)) {
+          if (!key) continue;
+          headers.set(`X-Api-Key-${provider}`, key);
+        }
+
+        aiInit.headers = headers;
+        return OriginalFetch.call(window, proxied, aiInit);
+      }
+
+      // All other localhost services are unavailable in sandbox mode.
       console.warn('[browser-shim] Blocked fetch to local service (sandbox):', url);
       return Promise.resolve(new Response(JSON.stringify({ error: 'Not available in sandbox' }), {
         status: 503,
         headers: { 'Content-Type': 'application/json' },
       }));
     }
+
     return OriginalFetch.call(window, input, init);
   };
 
@@ -400,16 +528,44 @@ collaboration, and cloud persistence.
   // Settings (localStorage)
   // ========================================================================
 
+  function clone(value) {
+    return JSON.parse(JSON.stringify(value));
+  }
+
+  function mergeSettingsWithDefaults(loaded) {
+    const merged = clone(DEFAULT_SANDBOX_SETTINGS);
+    const source = loaded && typeof loaded === 'object' ? loaded : {};
+
+    for (const key of Object.keys(DEFAULT_SANDBOX_SETTINGS)) {
+      if (source[key] === undefined) continue;
+
+      if (
+        typeof DEFAULT_SANDBOX_SETTINGS[key] === 'object'
+        && DEFAULT_SANDBOX_SETTINGS[key] !== null
+        && !Array.isArray(DEFAULT_SANDBOX_SETTINGS[key])
+      ) {
+        merged[key] = { ...DEFAULT_SANDBOX_SETTINGS[key], ...(source[key] || {}) };
+      } else {
+        merged[key] = source[key];
+      }
+    }
+
+    return merged;
+  }
+
   function getAllSettings() {
     try {
-      return JSON.parse(localStorage.getItem(SETTINGS_KEY)) || {};
+      const loaded = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
+      const merged = mergeSettingsWithDefaults(loaded);
+      return merged;
     } catch {
-      return {};
+      return clone(DEFAULT_SANDBOX_SETTINGS);
     }
   }
 
   function saveAllSettings(settings) {
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+    const merged = mergeSettingsWithDefaults(settings);
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(merged));
   }
 
   function getSetting(key, defaultValue) {
@@ -436,6 +592,127 @@ collaboration, and cloud persistence.
     current[parts[parts.length - 1]] = value;
     saveAllSettings(settings);
   }
+
+  function createId(prefix) {
+    return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  }
+
+  // ========================================================================
+  // Asset Blob URL Cache (for rendering images from IndexedDB)
+  // ========================================================================
+
+  /** Map<absolutePath, blobURL> */
+  const assetBlobCache = new Map();
+
+  /**
+   * Convert base64 string to a blob URL for browser display.
+   */
+  function base64ToBlobUrl(base64, mimeType) {
+    try {
+      const binary = atob(base64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      const blob = new Blob([bytes], { type: mimeType || 'application/octet-stream' });
+      return URL.createObjectURL(blob);
+    } catch (e) {
+      console.warn('[asset-cache] Failed to create blob URL:', e);
+      return null;
+    }
+  }
+
+  /**
+   * Convert Uint8Array -> base64 without blowing the JS call stack
+   * on large images (mobile camera photos, screenshots, etc.).
+   */
+  async function uint8ArrayToBase64(bytes) {
+    // Preferred path: FileReader on a Blob (stream-safe for large payloads)
+    if (typeof FileReader !== 'undefined') {
+      try {
+        const blob = new Blob([bytes], { type: 'application/octet-stream' });
+        const dataUrl = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result || ''));
+          reader.onerror = () => reject(reader.error || new Error('FileReader failed'));
+          reader.readAsDataURL(blob);
+        });
+        const comma = dataUrl.indexOf(',');
+        return comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
+      } catch {
+        // Fall through to chunked encoder
+      }
+    }
+
+    // Fallback path: chunked String.fromCharCode to avoid "Maximum call stack size exceeded"
+    const chunkSize = 0x8000; // 32KB chunks
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      const chunk = bytes.subarray(i, i + chunkSize);
+      binary += String.fromCharCode(...chunk);
+    }
+    return btoa(binary);
+  }
+
+  /**
+   * Guess MIME type from filename.
+   */
+  function mimeFromFilename(name) {
+    const ext = (name || '').split('.').pop().toLowerCase();
+    const map = {
+      png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg',
+      gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml',
+      bmp: 'image/bmp', ico: 'image/x-icon', pdf: 'application/pdf',
+    };
+    return map[ext] || 'application/octet-stream';
+  }
+
+  /**
+   * Cache a single asset's blob URL from its IndexedDB entry.
+   */
+  function cacheAssetBlob(entry) {
+    if (!entry || !entry.content || entry.isDir) return null;
+    const existing = assetBlobCache.get(entry.path);
+    if (existing) return existing;
+    const blobUrl = base64ToBlobUrl(entry.content, mimeFromFilename(entry.path));
+    if (blobUrl) assetBlobCache.set(entry.path, blobUrl);
+    return blobUrl;
+  }
+
+  /**
+   * Preload all assets in a project into the blob URL cache.
+   * Call this when opening a document or switching projects.
+   */
+  async function preloadProjectAssets(projectRoot) {
+    projectRoot = projectRoot || SANDBOX_ROOT;
+    const assetsDir = projectRoot + '/_assets';
+    try {
+      const entries = await fsListPrefix(assetsDir + '/');
+      let count = 0;
+      for (const entry of entries) {
+        if (!entry.isDir && entry.content) {
+          cacheAssetBlob(entry);
+          count++;
+        }
+      }
+      if (count > 0) console.log(`[asset-cache] Preloaded ${count} assets from ${assetsDir}`);
+    } catch (e) {
+      // No assets dir yet — that's fine
+    }
+  }
+
+  /**
+   * Resolve an absolute asset path to a blob URL (synchronous lookup).
+   * Returns null if not cached.
+   */
+  function resolveAssetBlobUrl(absolutePath) {
+    return assetBlobCache.get(absolutePath) || null;
+  }
+
+  // Expose for sandbox-bridge and inline scripts
+  window._sandboxAssetCache = {
+    preload: preloadProjectAssets,
+    resolve: resolveAssetBlobUrl,
+    cache: assetBlobCache,
+  };
 
   // ========================================================================
   // Recent Files (localStorage)
@@ -790,8 +1067,14 @@ collaboration, and cloud persistence.
     }),
 
     getAi: () => Promise.resolve({
-      success: false,
-      error: 'AI not available in sandbox. Paste your API key in Settings to enable.',
+      success: true,
+      // Value is only used to build http://127.0.0.1:${port} in index.html;
+      // fetch interceptor rewrites those calls to /api/ai/proxy/*.
+      port: 51790,
+      running: true,
+      managed: false,
+      sandbox: true,
+      url: '/api/ai/proxy',
     }),
 
     system: {
@@ -1134,12 +1417,19 @@ assets:
         const keys = getSetting('apiKeys', {});
         keys[provider] = key;
         setSetting('apiKeys', keys);
+        try {
+          window.dispatchEvent(new CustomEvent('mrmd:sandbox-settings-changed', {
+            detail: { type: 'api-key', provider },
+          }));
+        } catch { /* ignore */ }
         return Promise.resolve(true);
       },
 
       getApiKey: (provider) => {
         const keys = getSetting('apiKeys', {});
-        return Promise.resolve(keys[provider] || '');
+        const val = keys[provider] || '';
+        console.log(`[browser-shim] getApiKey(${provider}) → len=${val.length} prefix=${val.slice(0, 6)}`);
+        return Promise.resolve(val);
       },
 
       hasApiKey: (provider) => {
@@ -1147,27 +1437,100 @@ assets:
         return Promise.resolve(Boolean(keys[provider]));
       },
 
-      getApiProviders: () => Promise.resolve([
-        { id: 'anthropic', name: 'Anthropic', models: ['claude-sonnet-4-20250514'] },
-        { id: 'openai', name: 'OpenAI', models: ['gpt-4o'] },
-      ]),
+      getApiProviders: () => Promise.resolve(API_PROVIDERS),
 
-      getQualityLevels: () => Promise.resolve([
-        { id: 'fast', name: 'Fast', model: 'claude-sonnet-4-20250514' },
-        { id: 'balanced', name: 'Balanced', model: 'claude-sonnet-4-20250514' },
-        { id: 'best', name: 'Best', model: 'claude-sonnet-4-20250514' },
-      ]),
+      getQualityLevels: () => Promise.resolve(getSetting('qualityLevels', DEFAULT_SANDBOX_SETTINGS.qualityLevels)),
 
-      setQualityLevelModel: () => Promise.resolve(true),
-      getCustomSections: () => Promise.resolve([]),
-      addCustomSection: () => Promise.resolve({ id: 'stub', name: 'Section' }),
-      removeCustomSection: () => Promise.resolve(true),
-      addCustomCommand: () => Promise.resolve({ id: 'stub', name: 'Command' }),
-      updateCustomCommand: () => Promise.resolve(true),
-      removeCustomCommand: () => Promise.resolve(true),
-      getAllCustomCommands: () => Promise.resolve([]),
-      getDefaults: () => Promise.resolve({}),
-      setDefaults: () => Promise.resolve(true),
+      setQualityLevelModel: (level, model) => {
+        const qualityLevels = { ...getSetting('qualityLevels', DEFAULT_SANDBOX_SETTINGS.qualityLevels) };
+        const current = qualityLevels[level] || {};
+        qualityLevels[level] = { ...current, model };
+        setSetting('qualityLevels', qualityLevels);
+        return Promise.resolve(true);
+      },
+
+      getCustomSections: () => Promise.resolve(getSetting('customSections', [])),
+
+      addCustomSection: (name) => {
+        const customSections = [...getSetting('customSections', [])];
+        const section = { id: createId('section'), name, commands: [] };
+        customSections.push(section);
+        setSetting('customSections', customSections);
+        return Promise.resolve(section);
+      },
+
+      removeCustomSection: (sectionId) => {
+        const customSections = [...getSetting('customSections', [])]
+          .filter(section => section.id !== sectionId);
+        setSetting('customSections', customSections);
+        return Promise.resolve(true);
+      },
+
+      addCustomCommand: (sectionId, commandData) => {
+        const customSections = [...getSetting('customSections', [])];
+        const section = customSections.find(s => s.id === sectionId);
+        if (!section) {
+          return Promise.resolve({ success: false, error: 'Section not found' });
+        }
+
+        const id = createId('cmd');
+        const command = {
+          id,
+          ...commandData,
+          program: commandData.program || `Custom_${id.replace(/-/g, '_')}`,
+          resultField: commandData.resultField || 'result',
+        };
+
+        section.commands = section.commands || [];
+        section.commands.push(command);
+        setSetting('customSections', customSections);
+        return Promise.resolve(command);
+      },
+
+      updateCustomCommand: (sectionId, commandId, updates) => {
+        const customSections = [...getSetting('customSections', [])];
+        const section = customSections.find(s => s.id === sectionId);
+        if (!section) return Promise.resolve(false);
+
+        const idx = (section.commands || []).findIndex(c => c.id === commandId);
+        if (idx < 0) return Promise.resolve(false);
+
+        section.commands[idx] = { ...section.commands[idx], ...updates };
+        setSetting('customSections', customSections);
+        return Promise.resolve(true);
+      },
+
+      removeCustomCommand: (sectionId, commandId) => {
+        const customSections = [...getSetting('customSections', [])];
+        const section = customSections.find(s => s.id === sectionId);
+        if (!section) return Promise.resolve(false);
+
+        section.commands = (section.commands || []).filter(c => c.id !== commandId);
+        setSetting('customSections', customSections);
+        return Promise.resolve(true);
+      },
+
+      getAllCustomCommands: () => {
+        const sections = getSetting('customSections', []);
+        const commands = [];
+        for (const section of sections) {
+          for (const command of (section.commands || [])) {
+            commands.push({
+              ...command,
+              sectionId: section.id,
+              sectionName: section.name,
+            });
+          }
+        }
+        return Promise.resolve(commands);
+      },
+
+      getDefaults: () => Promise.resolve(getSetting('defaults', DEFAULT_SANDBOX_SETTINGS.defaults)),
+
+      setDefaults: (defaults) => {
+        setSetting('defaults', { ...getSetting('defaults', DEFAULT_SANDBOX_SETTINGS.defaults), ...defaults });
+        return Promise.resolve(true);
+      },
       export: () => Promise.resolve(getAllSettings()),
       import: (json) => {
         try {
@@ -1365,7 +1728,10 @@ assets:
         const assetsDir = projectRoot + '/_assets';
         const entries = await fsListPrefix(assetsDir + '/');
         return entries.filter(e => !e.isDir).map(e => ({
-          path: e.path,
+          // Match mrmd-server shape: path relative to _assets/
+          path: e.path.startsWith(assetsDir + '/')
+            ? e.path.slice((assetsDir + '/').length)
+            : baseName(e.path),
           name: baseName(e.path),
           size: e.content ? e.content.length : 0,
           modified: e.modified,
@@ -1375,55 +1741,94 @@ assets:
       save: async (projectRoot, fileData, filename) => {
         projectRoot = projectRoot || SANDBOX_ROOT;
         const assetsDir = projectRoot + '/_assets';
-        const assetPath = normalizePath(assetsDir + '/' + filename);
-        await ensureParentDirs(assetPath);
+        const relativeAssetPath = String(filename || 'asset.bin').replace(/^\/+/, '');
+        const fullAssetPath = normalizePath(assetsDir + '/' + relativeAssetPath);
+        await ensureParentDirs(fullAssetPath);
 
         // fileData may be base64 string or Uint8Array
         let content;
         if (typeof fileData === 'string') {
           content = fileData; // Store base64 as-is
         } else if (fileData instanceof Uint8Array) {
-          // Convert to base64 for storage
-          content = btoa(String.fromCharCode.apply(null, fileData));
+          // Convert to base64 safely (handles large images on mobile)
+          content = await uint8ArrayToBase64(fileData);
         } else {
           content = String(fileData);
         }
 
         const now = Date.now();
-        await fsPut({
-          path: assetPath,
-          parent: assetsDir,
+        const entry = {
+          path: fullAssetPath,
+          parent: parentDir(fullAssetPath),
           content,
           isDir: false,
           created: now,
           modified: now,
-        });
+        };
+        await fsPut(entry);
 
-        return { success: true, path: assetPath };
+        // Cache blob URL so the asset resolver can serve it immediately
+        cacheAssetBlob(entry);
+
+        // Match mrmd-server shape: return path relative to _assets/
+        return { success: true, path: relativeAssetPath, deduplicated: false };
       },
 
       relativePath: async (assetPath, documentPath) => {
-        // Simple relative path calculation
-        const assetParts = assetPath.split('/');
-        const docParts = documentPath.split('/');
-        docParts.pop(); // Remove filename
+        // Match AssetService.getRelativePath(assetPath, documentPath)
+        // Inputs are expected to be relative to project root, but tolerate absolute sandbox paths.
+
+        const normalizeAssetPath = (p) => {
+          const raw = String(p || '');
+          const idx = raw.indexOf('/_assets/');
+          if (idx >= 0) return raw.slice(idx + '/_assets/'.length);
+          return raw.replace(/^\/+/, '').replace(/^_assets\//, '');
+        };
+
+        const normalizeDocPath = (p) => {
+          const raw = String(p || '').replace(/^\/+/, '');
+          const parts = raw.split('/').filter(Boolean);
+          // If absolute sandbox path like sandbox/docs/file.md, drop project-root segment.
+          if (parts.length >= 2) return parts.slice(1).join('/');
+          return parts.join('/');
+        };
+
+        const assetRel = normalizeAssetPath(assetPath);
+        const docRel = normalizeDocPath(documentPath);
+        const docDir = docRel.includes('/') ? docRel.slice(0, docRel.lastIndexOf('/')) : '';
+
+        const fromParts = docDir ? docDir.split('/').filter(Boolean) : [];
+        const toParts = ['_assets', ...assetRel.split('/').filter(Boolean)];
 
         let common = 0;
-        while (common < assetParts.length && common < docParts.length &&
-          assetParts[common] === docParts[common]) {
+        while (common < fromParts.length && common < toParts.length && fromParts[common] === toParts[common]) {
           common++;
         }
 
-        const ups = docParts.length - common;
-        const downs = assetParts.slice(common);
+        const ups = fromParts.length - common;
+        const downs = toParts.slice(common);
         const relative = '../'.repeat(ups) + downs.join('/');
-        return relative;
+        return relative || '_assets/' + assetRel;
       },
 
       orphans: async () => [],
 
       delete: async (projectRoot, assetPath) => {
-        await fsDelete(assetPath);
+        projectRoot = projectRoot || SANDBOX_ROOT;
+        const raw = String(assetPath || '');
+        const idx = raw.indexOf('/_assets/');
+        const rel = idx >= 0
+          ? raw.slice(idx + '/_assets/'.length)
+          : raw.replace(/^\/+/, '').replace(/^_assets\//, '');
+        const full = normalizePath(projectRoot + '/_assets/' + rel);
+
+        const blobUrl = assetBlobCache.get(full);
+        if (blobUrl) {
+          try { URL.revokeObjectURL(blobUrl); } catch { /* ignore */ }
+          assetBlobCache.delete(full);
+        }
+
+        await fsDelete(full);
         return { success: true };
       },
     },

@@ -71,6 +71,7 @@ function ensureUserWorkspace(userId, user = {}) {
   mkdirSync(tutorialDir, { recursive: true });
   mkdirSync(assetsDir, { recursive: true });
   mkdirSync(`${userDir}/.npm-global`, { recursive: true });
+  mkdirSync(`${userDir}/.local/lib/R/site-library`, { recursive: true });
 
   // Keep backward compatibility with older paths expecting lowercase "projects"
   const lowerProjectsDir = `${userDir}/projects`;
@@ -91,6 +92,7 @@ function ensureUserWorkspace(userId, user = {}) {
   writeIfMissing(`${userDir}/.npmrc`, 'prefix=/home/ubuntu/.npm-global\n');
   appendLineIfMissing(`${userDir}/.bashrc`, 'export PATH="$HOME/.npm-global/bin:$PATH"');
   appendLineIfMissing(`${userDir}/.profile`, 'export PATH="$HOME/.npm-global/bin:$PATH"');
+  appendLineIfMissing(`${userDir}/.Renviron`, 'R_LIBS_USER=~/.local/lib/R/site-library');
   appendLineIfMissing(`${userDir}/.bashrc`, 'apt() { sudo apt-get update && sudo apt-get "$@"; }');
   appendLineIfMissing(`${userDir}/.bashrc`, "alias apt-install='sudo apt-get update && sudo apt-get install -y'");
 
@@ -238,8 +240,11 @@ async function startEditorContainer(userId, editorPort, runtimePort, user = {}) 
     '-e', `CLOUD_HOME=/home/ubuntu`,
     '-e', `USER=ubuntu`,
     '-e', `LOGNAME=ubuntu`,
+    '-e', `R_LIBS_USER=/home/ubuntu/.local/lib/R/site-library`,
     '-e', `MARKCO_LINUX_USERNAME=${linuxUsername}`,
     '-e', `CLOUD_MODE=1`,
+    '-e', `SYNC_MODE=${process.env.SYNC_MODE || 'legacy'}`,
+    '-e', `SYNC_RELAY_URL=ws://localhost:${process.env.SYNC_RELAY_PORT || '3006'}`,
     '-e', `RUNTIME_PORT=${runtimePort}`,
     '-e', `PORT=${editorPort}`,
     '-e', `BASE_PATH=/u/${userId}/`,
@@ -338,6 +343,7 @@ export async function onUserLogin(user) {
     runtimeContainer: runtime.container_name,
     runtimePort: runtime.port,
     host: 'localhost',
+    plan: user.plan || 'free',
   };
 
   activeEditors.set(userId, editorInfo);
@@ -445,6 +451,7 @@ export async function onUserReturn(userId) {
         runtimeContainer: rt.container_name,
         runtimePort: rt.port,
         host: 'localhost',
+        plan: editor.plan || 'free',
       };
 
       activeEditors.set(userId, newInfo);
@@ -532,6 +539,7 @@ export async function reconcileContainers() {
         const userId = env.CLOUD_USER_ID;
         const editorPort = parseInt(env.PORT, 10);
         const runtimePort = parseInt(env.RUNTIME_PORT, 10);
+        const plan = env.CLOUD_USER_PLAN || 'free';
 
         if (!userId || !editorPort) {
           console.warn(`[lifecycle] Skipping ${containerName}: missing CLOUD_USER_ID or PORT`);
@@ -567,6 +575,7 @@ export async function reconcileContainers() {
           runtimeContainer: runtimeContainer || null,
           runtimePort: runtimePort || 0,
           host: 'localhost',
+          plan,
         };
 
         activeEditors.set(userId, editorInfo);
@@ -663,9 +672,39 @@ async function checkEditorHealth(userId, info) {
       runtimeAlive = res.ok;
     } catch { /* dead */ }
 
-    if (!runtimeAlive && info.runtimeContainer) {
-      console.warn(`[health] Runtime for ${userId} not responding on port ${info.runtimePort}`);
+    if (runtimeAlive) {
+      // Reset failure counter on success
+      info._runtimeFailCount = 0;
+    } else {
+      // Phase 0: Track consecutive failures before replacing runtime.
+      // Avoids thrashing on transient network blips.
+      info._runtimeFailCount = (info._runtimeFailCount || 0) + 1;
+      const MAX_FAILURES_BEFORE_REPLACE = 3;
+
+      if (info._runtimeFailCount < MAX_FAILURES_BEFORE_REPLACE) {
+        console.warn(`[health] Runtime for ${userId} not responding (${info._runtimeFailCount}/${MAX_FAILURES_BEFORE_REPLACE}), waiting...`);
+        return;
+      }
+
+      console.warn(`[health] Runtime for ${userId} not responding after ${info._runtimeFailCount} checks, replacing`);
+      info._runtimeFailCount = 0;
+
+      const provisionReplacement = async () => {
+        const rt = await computeManager.startRuntime(userId, info.plan || 'free');
+        info.runtimeId = rt.runtime_id;
+        info.runtimeContainer = rt.container_name;
+        info.runtimePort = rt.port;
+        await notifyRuntimePortChange(userId, rt.port, rt.host || 'localhost');
+        console.log(`[health] Runtime replaced for ${userId}: ${rt.container_name} on ${rt.port}`);
+      };
+
       try {
+        if (!info.runtimeContainer) {
+          console.warn(`[health] Missing runtime container name for ${userId}; provisioning replacement`);
+          await provisionReplacement();
+          return;
+        }
+
         const { stdout } = await execFile('sudo', [
           'podman', 'ps', '-a', '--filter', `name=${info.runtimeContainer}`,
           '--format', '{{.Status}}',
@@ -674,7 +713,19 @@ async function checkEditorHealth(userId, info) {
         if (stdout.includes('Exited')) {
           console.log(`[health] Restarting exited runtime container ${info.runtimeContainer}`);
           await execFile('sudo', ['podman', 'start', info.runtimeContainer], { timeout: 15000 });
-          console.log(`[health] Runtime ${info.runtimeContainer} restarted`);
+
+          // Verify runtime endpoint is actually back before declaring success.
+          try {
+            await waitForHealth(info.runtimePort, '/mrp/v1/capabilities', 12000);
+            console.log(`[health] Runtime ${info.runtimeContainer} restarted`);
+          } catch {
+            console.warn(`[health] Runtime ${info.runtimeContainer} restarted but still unhealthy; provisioning replacement`);
+            await provisionReplacement();
+          }
+        } else if (!stdout.trim()) {
+          // Runtime container is gone. Create a fresh one and hot-update editor routing.
+          console.warn(`[health] Runtime container ${info.runtimeContainer} missing for ${userId}; provisioning replacement`);
+          await provisionReplacement();
         }
       } catch (err) {
         console.warn(`[health] Failed to restart runtime: ${err.message}`);

@@ -3,7 +3,7 @@
  */
 
 import { Router } from 'express';
-import { authService, computeManager, resourceMonitor, publishService } from '../service-client.js';
+import { authService, computeManager, resourceMonitor, publishService, syncRelay } from '../service-client.js';
 import { healthCheck as caddyHealth } from '../caddy.js';
 import { getAllEditors } from '../user-lifecycle.js';
 
@@ -16,6 +16,7 @@ router.get('/api/health', async (_req, res) => {
     computeManager.health(),
     resourceMonitor.health(),
     caddyHealth(),
+    syncRelay.health(),
   ]);
 
   const services = {
@@ -24,6 +25,7 @@ router.get('/api/health', async (_req, res) => {
     compute: checks[1].status === 'fulfilled' ? 'ok' : 'down',
     monitor: checks[2].status === 'fulfilled' ? 'ok' : 'down',
     caddy: checks[3].status === 'fulfilled' && checks[3].value ? 'ok' : 'down',
+    'sync-relay': checks[4].status === 'fulfilled' ? 'ok' : 'down',
   };
 
   const allOk = Object.values(services).every(s => s === 'ok');
@@ -36,11 +38,12 @@ router.get('/api/health', async (_req, res) => {
 
 // ── GET /api/services ─────────────────────────────────────────────────
 router.get('/api/services', async (_req, res) => {
-  const [auth, compute, monitor, caddy] = await Promise.allSettled([
+  const [auth, compute, monitor, caddy, relay] = await Promise.allSettled([
     authService.health(),
     computeManager.health(),
     resourceMonitor.health(),
     caddyHealth(),
+    syncRelay.health(),
   ]);
 
   let monitorStatus = null;
@@ -66,6 +69,10 @@ router.get('/api/services', async (_req, res) => {
       caddy: {
         url: process.env.CADDY_ADMIN_URL || 'http://localhost:2019',
         status: caddy.status === 'fulfilled' && caddy.value ? 'ok' : 'down',
+      },
+      'sync-relay': {
+        url: process.env.SYNC_RELAY_URL || `http://localhost:${process.env.SYNC_RELAY_PORT || '3006'}`,
+        status: relay.status === 'fulfilled' ? relay.value : { status: 'down' },
       },
     },
     editors: getAllEditors(),

@@ -10,9 +10,10 @@ Last synced from operational notes: **2026-02-09 STATUS snapshot**.
 - Type: `t3.large` (2 vCPU, 8 GB RAM)
 - Region/AZ: `ca-central-1b`
 - OS: Ubuntu 24.04
-- Public IP at snapshot time: `16.52.74.84` (not Elastic)
+- Public IP at snapshot time: `52.60.156.234` (not Elastic)
+- SSH key: `~/.ssh/feuille-key.pem` (pre-rename name)
 
-> Because there is no Elastic IP yet, callback/domain/IP-linked settings can drift after stop/start.
+> Because there is no Elastic IP yet, callback/domain/IP-linked settings can drift after stop/start. Resolve `markco.dev` to find current IP.
 
 ## Service topology on host
 
@@ -23,6 +24,11 @@ Last synced from operational notes: **2026-02-09 STATUS snapshot**.
   - compute-manager `:3002`
   - publish-service `:3003`
   - resource-monitor `:3004`
+- Umami analytics: systemd `umami.service` (`:3005`, Podman container)
+  - Dashboard: `https://markco.dev/analytics/`
+  - Tracking script: `<script defer src="/script.js" data-website-id="5bd6256f-5f28-44eb-9e1c-0f76301a9f2c"></script>`
+  - Default admin user: `admin` (password rotated on setup, stored on server only)
+  - Database: `umami` (separate from platform `markco` database)
 - PostgreSQL: systemd `postgresql.service` (`:5432`)
 
 ## Container topology

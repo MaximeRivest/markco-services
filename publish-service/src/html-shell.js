@@ -16,7 +16,7 @@ function renderHtml({ title, navTree, content, outputs }) {
     '<head>',
     '  <meta charset="utf-8">',
     '  <meta name="viewport" content="width=device-width, initial-scale=1">',
-    '  <title>' + escapeHtml(title) + ' \u2014 feuille.dev</title>',
+    '  <title>' + escapeHtml(title) + ' \u2014 markco.dev</title>',
     '  <script src="/static/mrmd-reader.iife.js"><\/script>',
     '  <style>',
     '    body { margin: 0; font-family: system-ui, -apple-system, sans-serif; color: #333; }',

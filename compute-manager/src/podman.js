@@ -37,7 +37,7 @@ export async function startContainer({ name, image, memoryLimit, cpuLimit, port,
   const args = [
     'run', '-d',
     '--name', name,
-    '--restart=on-failure:5',
+    '--restart=always',
     '--runtime', 'runc',
     '--security-opt', 'apparmor=unconfined',
     '--memory', String(memoryLimit || 268435456),
@@ -51,6 +51,15 @@ export async function startContainer({ name, image, memoryLimit, cpuLimit, port,
     args.push('-v', `${volumeMount}:U`);
   }
   args.push(image || 'localhost/mrmd-runtime:latest');
+
+  // Force a clean runtime metadata state on each container boot.
+  // The runtime home is persisted per user, so stale ~/.mrmd/runtimes/default.json
+  // can make mrmd-python think a prior PID 1 is still alive and exit immediately.
+  args.push(
+    'bash',
+    '-lc',
+    'rm -f /home/ubuntu/.mrmd/runtimes/default.json && exec mrmd-python --foreground --port 8888 --host 0.0.0.0 --id default',
+  );
 
   const { stdout } = await run('podman', args, host);
   return { containerId: stdout };

@@ -33,10 +33,10 @@ export function generateCaddyConfig() {
                   upstreams: [{ dial: 'localhost:3003' }],
                 }],
               },
-              // Auth callback → orchestrator
+              // Auth callback → orchestrator (OAuth callbacks + magic link verify)
               {
                 '@id': 'auth-callback',
-                match: matchPath('/auth/callback/*'),
+                match: [{ host: HOSTS, path: ['/auth/callback/*', '/auth/email/verify'] }],
                 handle: [{
                   handler: 'reverse_proxy',
                   upstreams: [{ dial: 'localhost:3000' }],
@@ -60,6 +60,33 @@ export function generateCaddyConfig() {
                   upstreams: [{ dial: 'localhost:3001' }],
                 }],
               },
+              // Umami analytics: tracking script
+              {
+                '@id': 'umami-script',
+                match: matchPath('/script.js'),
+                handle: [{
+                  handler: 'reverse_proxy',
+                  upstreams: [{ dial: 'localhost:3005' }],
+                }],
+              },
+              // Umami analytics: event collector (must be before /api/*)
+              {
+                '@id': 'umami-send',
+                match: matchPath('/api/send'),
+                handle: [{
+                  handler: 'reverse_proxy',
+                  upstreams: [{ dial: 'localhost:3005' }],
+                }],
+              },
+              // Umami analytics: dashboard
+              {
+                '@id': 'umami-dashboard',
+                match: matchPath('/analytics/*'),
+                handle: [{
+                  handler: 'reverse_proxy',
+                  upstreams: [{ dial: 'localhost:3005' }],
+                }],
+              },
               // API routes
               {
                 '@id': 'api',
@@ -74,7 +101,7 @@ export function generateCaddyConfig() {
                 '@id': 'orchestrator-pages',
                 match: [{
                   host: HOSTS,
-                  path: ['/login', '/login/*', '/dashboard', '/sandbox', '/hooks/*', '/projects/*', '/u/*', '/logout', '/api/logout'],
+                  path: ['/login', '/login/*', '/dashboard', '/sandbox', '/hooks/*', '/projects/*', '/u/*', '/logout', '/api/logout', '/.well-known/assetlinks.json'],
                 }],
                 handle: [{
                   handler: 'reverse_proxy',

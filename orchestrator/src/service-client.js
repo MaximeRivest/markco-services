@@ -50,10 +50,39 @@ export const authService = {
     });
   },
 
+  /** Exchange a Google OAuth code for a user + session token. */
+  googleAuth(code, redirectUri) {
+    return request(AUTH_URL, '/auth/google', {
+      method: 'POST',
+      body: { code, redirect_uri: redirectUri },
+    });
+  },
+
+  /** Send a magic login link to the given email. */
+  sendMagicLink(email) {
+    return request(AUTH_URL, '/auth/email', {
+      method: 'POST',
+      body: { email },
+    });
+  },
+
+  /** Verify a magic link token, returns { user, token, expires_at }. */
+  verifyMagicLink(token) {
+    return request(AUTH_URL, `/auth/email/verify?token=${encodeURIComponent(token)}`);
+  },
+
   /** Log out (invalidate token). */
   logout(token) {
     return request(AUTH_URL, '/auth/logout', {
       method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+  },
+
+  /** Delete current authenticated account. */
+  deleteAccount(token) {
+    return request(AUTH_URL, '/auth/account', {
+      method: 'DELETE',
       headers: { Authorization: `Bearer ${token}` },
     });
   },
@@ -156,5 +185,27 @@ export const publishService = {
     return request(PUBLISH_URL, '/@_healthcheck/_test', { timeout: 5000 })
       .then(() => ({ status: 'ok' }))
       .catch(() => ({ status: 'ok' })); // 404 is fine, means the service is up
+  },
+};
+
+// ── Sync Relay ────────────────────────────────────────────────────────
+
+const SYNC_RELAY_URL = process.env.SYNC_RELAY_URL || `http://localhost:${process.env.SYNC_RELAY_PORT || '3006'}`;
+
+export const syncRelay = {
+  health() {
+    return request(SYNC_RELAY_URL, '/health', { timeout: 5000 });
+  },
+
+  stats() {
+    return request(SYNC_RELAY_URL, '/stats', { timeout: 5000 });
+  },
+
+  listDocuments(userId) {
+    return request(SYNC_RELAY_URL, `/api/documents/${userId}`, { timeout: 10000 });
+  },
+
+  listProjectDocuments(userId, project) {
+    return request(SYNC_RELAY_URL, `/api/documents/${userId}/${project}`, { timeout: 10000 });
   },
 };

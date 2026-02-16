@@ -1,5 +1,5 @@
 /**
- * FSML — Filesystem-to-URL mapping for feuille.dev publish service.
+ * FSML — Filesystem-to-URL mapping for markco.dev publish service.
  *
  * Rules:
  *   - Strip leading numeric prefix: "02-getting-started" -> "getting-started"

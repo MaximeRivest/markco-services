@@ -12,7 +12,7 @@ const RUNTIME_AMI_ID = process.env.RUNTIME_AMI_ID;
 const SECURITY_GROUP_ID = process.env.SECURITY_GROUP_ID;
 const SUBNET_ID = process.env.SUBNET_ID;
 const KEY_NAME = process.env.KEY_NAME;
-const SSH_KEY_PATH = process.env.SSH_KEY_PATH || '/home/ubuntu/.ssh/feuille-runtime';
+const SSH_KEY_PATH = process.env.SSH_KEY_PATH || '/home/ubuntu/.ssh/markco-runtime';
 const SSH_USER = process.env.SSH_USER || 'ubuntu';
 
 /**
@@ -33,8 +33,8 @@ export async function provisionInstance(instanceType, amiId) {
     TagSpecifications: [{
       ResourceType: 'instance',
       Tags: [
-        { Key: 'Name', Value: `feuille-runtime-${instanceType}` },
-        { Key: 'Service', Value: 'feuille-compute' },
+        { Key: 'Name', Value: `markco-runtime-${instanceType}` },
+        { Key: 'Service', Value: 'markco-compute' },
         { Key: 'ManagedBy', Value: 'compute-manager' },
       ],
     }],

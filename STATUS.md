@@ -1,8 +1,8 @@
-# Feuille Platform Status
+# Markco Platform Status
 
 > Last updated: 2026-02-09
 >
-> Canonical docs are being moved to `feuille-services/docs/`:
+> Canonical docs are being moved to `markco-services/docs/`:
 > - `docs/README.md`
 > - `docs/00-quick-explain.md`
 > - `docs/10-architecture-overview.md`
@@ -13,27 +13,27 @@
 ## Server
 
 - **EC2:** t3.large (2 vCPU, 8GB RAM), ca-central-1b
-- **Instance ID:** i-04210339d6c067c47, name `feuille-base`
+- **Instance ID:** i-04210339d6c067c47, name `markco-base`
 - **OS:** Ubuntu 24.04
-- **IP:** `16.52.74.84` (no Elastic IP — changes on stop/start)
-- **SSH:** `ssh -i ~/.ssh/feuille-key.pem ubuntu@16.52.74.84`
+- **IP:** `52.60.156.234` (no Elastic IP — changes on stop/start)
+- **SSH:** `ssh -i ~/.ssh/feuille-key.pem ubuntu@52.60.156.234`
 
 > Previously t3.small (2GB). Upgraded to t3.large to support building R + Julia packages from source.
 
 ## What's Running
 
-All services managed by a single systemd unit (`feuille.service`) that starts the orchestrator, which spawns the 4 Layer 3 services as child processes.
+All services managed by a single systemd unit (`markco.service`) that starts the orchestrator, which spawns the 4 Layer 3 services as child processes.
 
 ```
-systemctl status feuille          # check status
-sudo journalctl -u feuille -f     # tail logs
-sudo systemctl restart feuille    # restart everything
+systemctl status markco          # check status
+sudo journalctl -u markco -f     # tail logs
+sudo systemctl restart markco    # restart everything
 ```
 
 | Service | Port | Status |
 |---------|------|--------|
 | Caddy (reverse proxy) | 80 | systemd `caddy.service` |
-| Orchestrator | 3000 | systemd `feuille.service` (parent) |
+| Orchestrator | 3000 | systemd `markco.service` (parent) |
 | Auth Service | 3001 | child of orchestrator |
 | Compute Manager | 3002 | child of orchestrator |
 | Publish Service | 3003 | child of orchestrator |
@@ -129,8 +129,8 @@ Caddy config generated dynamically by orchestrator on startup:
 ## File Locations on Server
 
 ```
-/opt/feuille/feuille-services/    # all service code (orchestrator, auth, compute, publish, monitor)
-/opt/feuille/editor-build/        # editor container build context
+/opt/markco/markco-services/    # all service code (orchestrator, auth, compute, publish, monitor)
+/opt/markco/editor-build/        # editor container build context
   ├── Dockerfile                  # editor container Dockerfile
   ├── mrmd-electron/              # editor UI + services
   ├── mrmd-server/                # HTTP server
@@ -138,16 +138,16 @@ Caddy config generated dynamically by orchestrator on startup:
   ├── mrmd-sync/                  # Yjs CRDT server
   ├── mrmd-r/                     # R runtime package
   └── mrmd-julia/                 # Julia runtime package
-/opt/feuille/Dockerfile.runtime   # runtime container Dockerfile
-/opt/feuille/static/              # static assets (mrmd-reader.iife.js)
+/opt/markco/Dockerfile.runtime   # runtime container Dockerfile
+/opt/markco/static/              # static assets (mrmd-reader.iife.js)
 /data/users/<userId>/             # per-user data directory (volume-mounted into containers)
 /etc/caddy/Caddyfile              # Caddy base config (admin API only, real config via API)
-/etc/systemd/system/feuille.service  # systemd unit
+/etc/systemd/system/markco.service  # systemd unit
 ```
 
 ## Database
 
-PostgreSQL `feuille` database, 6 tables:
+PostgreSQL `markco` database, 6 tables:
 - `users` — id, email, name, github_id, google_id, plan, avatar_url
 - `sessions` — user_id, token, expires_at
 - `invites` — project_path, token, role, created_by
@@ -155,7 +155,7 @@ PostgreSQL `feuille` database, 6 tables:
 - `snapshots` — user_id, runtime_id, name, path, size
 - `migrations` — runtime_id, from/to instance, checkpoint/transfer/restore ms
 
-Connection: `postgresql://postgres:feuille@localhost:5432/feuille`
+Connection: `postgresql://postgres:markco@localhost:5432/markco`
 
 Test user: `Maxime Rivest` (github_id=10967951, id=31bdffb9-39c5-4ed6-b4c7-5f16c9958045)
 
@@ -163,7 +163,7 @@ Test user: `Maxime Rivest` (github_id=10967951, id=31bdffb9-39c5-4ed6-b4c7-5f16c
 
 ### GitHub (working)
 - Client ID: `Ov23liM4fA4d5GE5Jbc1`
-- Client Secret: in systemd env (`/etc/systemd/system/feuille.service`)
+- Client Secret: in systemd env (`/etc/systemd/system/markco.service`)
 - Callback: `http://16.52.74.84/auth/callback/github`
 - Flow: `/login` → GitHub → `/auth/callback/github` → `/dashboard`
 
@@ -231,8 +231,8 @@ Test user: `Maxime Rivest` (github_id=10967951, id=31bdffb9-39c5-4ed6-b4c7-5f16c
 - **Sandbox fork**: CRIU `--leave-running` clone, both run independently, sandbox destroyable
 - **Cross-EC2 migration**: checkpoint → SCP (same AZ, ~0.5s) → restore on different instance → MRP works. Total ~3.5s.
 - **Runtime AMI**: `ami-075cdf252eaacec79` (Ubuntu 24.04 + Podman + CRIU + mrmd-runtime:latest)
-- **Security group**: `sg-073bb39d9229b6c9f` (feuille-runtime, allows SSH + ports from base)
-- **SSH key**: `/home/ubuntu/.ssh/feuille-runtime` (ed25519, baked into AMI)
+- **Security group**: `sg-073bb39d9229b6c9f` (markco-runtime, allows SSH + ports from base)
+- **SSH key**: `/home/ubuntu/.ssh/markco-runtime` (ed25519, baked into AMI)
 - **Hot-reload**: editor's `/api/runtime/update-port` endpoint updates Python MRP routing (port + host) without restart
 - **Remote runtime support**: CloudSessionService + `/proxy/:port` route to configurable host (not hardcoded 127.0.0.1)
 - **EC2 cleanup**: migration terminates old EC2 if source was remote; stopRuntime terminates EC2 too
@@ -251,7 +251,7 @@ Test user: `Maxime Rivest` (github_id=10967951, id=31bdffb9-39c5-4ed6-b4c7-5f16c
 9. **Publishing polish** — code blocks show play/copy/close buttons in reader mode (should be hidden), no active page highlighting in nav
 10. **Share/invite UI** — no UI yet, invite API exists
 11. **Compute indicator** — no UI showing runtime tier
-12. **Custom domains** — needs real DNS (feuille.dev)
+12. **Custom domains** — needs real DNS (markco.dev)
 13. **CloudFront CDN** — not set up yet, static assets served directly
 
 ## Rebuilding
@@ -260,35 +260,35 @@ Test user: `Maxime Rivest` (github_id=10967951, id=31bdffb9-39c5-4ed6-b4c7-5f16c
 ```bash
 # On local machine: sync updated files to server build context
 rsync -avz --exclude='node_modules' --exclude='.git' \
-  mrmd-server/ -e "ssh -i ~/.ssh/feuille-key.pem" \
-  ubuntu@16.52.74.84:/opt/feuille/editor-build/mrmd-server/
+  mrmd-server/ -e "ssh -i ~/.ssh/markco-key.pem" \
+  ubuntu@16.52.74.84:/opt/markco/editor-build/mrmd-server/
 
 # On server (or via SSH): rebuild
-cd /opt/feuille/editor-build && sudo podman build -t mrmd-editor:latest -f Dockerfile .
+cd /opt/markco/editor-build && sudo podman build -t mrmd-editor:latest -f Dockerfile .
 
 # For long builds, run detached so SSH disconnect doesn't kill it:
-nohup bash -c "cd /opt/feuille/editor-build && sudo podman build -t mrmd-editor:latest -f Dockerfile . > /tmp/build.log 2>&1" &
+nohup bash -c "cd /opt/markco/editor-build && sudo podman build -t mrmd-editor:latest -f Dockerfile . > /tmp/build.log 2>&1" &
 tail -f /tmp/build.log
 ```
 
 ### Runtime container
 ```bash
 # On server:
-sudo podman build -t mrmd-runtime:latest -f /opt/feuille/Dockerfile.runtime /tmp/
+sudo podman build -t mrmd-runtime:latest -f /opt/markco/Dockerfile.runtime /tmp/
 ```
 
 ### Deploying orchestrator changes (no rebuild needed)
 ```bash
 # Copy updated files to server
-scp -i ~/.ssh/feuille-key.pem \
-  feuille-services/orchestrator/src/*.js \
+scp -i ~/.ssh/markco-key.pem \
+  markco-services/orchestrator/src/*.js \
   ubuntu@16.52.74.84:/tmp/
 
-ssh -i ~/.ssh/feuille-key.pem ubuntu@16.52.74.84 '
-  sudo cp /tmp/*.js /opt/feuille/feuille-services/orchestrator/src/
+ssh -i ~/.ssh/markco-key.pem ubuntu@16.52.74.84 '
+  sudo cp /tmp/*.js /opt/markco/markco-services/orchestrator/src/
   sudo podman rm -f $(sudo podman ps -aq) 2>/dev/null
-  sudo -u postgres psql feuille -qc "DELETE FROM runtimes"
-  sudo systemctl restart feuille
+  sudo -u postgres psql markco -qc "DELETE FROM runtimes"
+  sudo systemctl restart markco
 '
 ```
 
@@ -296,7 +296,7 @@ ssh -i ~/.ssh/feuille-key.pem ubuntu@16.52.74.84 '
 
 All changes in local repo at `/home/maxime/Projects/mrmd-packages/`:
 
-### feuille-services/ (orchestrator & infra)
+### markco-services/ (orchestrator & infra)
 - `orchestrator/src/index.js` — WebSocket proxy for `/u/<userId>/*`, imports ws library
 - `orchestrator/src/routes/main.js` — HTTP reverse proxy to editor containers (replaced Caddy dynamic routes)
 - `orchestrator/src/user-lifecycle.js` — `--replace` flag, `BASE_PATH` env var, concurrency lock, removed Caddy addRoute/removeRoute calls
@@ -311,7 +311,7 @@ All changes in local repo at `/home/maxime/Projects/mrmd-packages/`:
 - `static/http-shim.js` — strip leading `/` from API paths, sync/proxy/events URLs (so `new URL()` resolves relative to BASE_URL path)
 
 ### Previously changed (from earlier sessions)
-- `feuille-services/auth-service/src/routes/auth.js` — handle non-JSON GitHub responses
+- `markco-services/auth-service/src/routes/auth.js` — handle non-JSON GitHub responses
 - `mrmd-python/src/mrmd_python/cli.py` — `--host` CLI argument
 - `mrmd-python/src/mrmd_python/runtime_daemon.py` — configurable host
 

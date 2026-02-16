@@ -47,6 +47,15 @@ const SERVICE_DEFS = [
     healthPath: '/health',
     env: { PORT: '3004' },
   },
+  {
+    name: 'sync-relay',
+    dir: resolve(SERVICES_DIR, 'sync-relay'),
+    command: 'node',
+    args: ['src/index.js'],
+    port: parseInt(process.env.SYNC_RELAY_PORT || '3006', 10),
+    healthPath: '/health',
+    env: { PORT: process.env.SYNC_RELAY_PORT || '3006' },
+  },
 ];
 
 /** Map of service name → { process, def, restartCount } */

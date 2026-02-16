@@ -30,14 +30,29 @@ router.post('/', async (req, res, next) => {
     );
     if (existing.rows.length) {
       const rt = existing.rows[0];
-      return res.json({
-        runtime_id: rt.id,
-        container_name: rt.container_name,
-        host: rt.host,
-        port: rt.port,
-        instance_type: rt.instance_type,
-        state: rt.state,
-      });
+
+      // Self-heal stale DB rows: if container no longer exists, mark stopped and start fresh.
+      let runtimeAlive = false;
+      try {
+        await podman.getContainerStats(rt.container_name, rt.host);
+        runtimeAlive = true;
+      } catch {
+        runtimeAlive = false;
+      }
+
+      if (runtimeAlive) {
+        return res.json({
+          runtime_id: rt.id,
+          container_name: rt.container_name,
+          host: rt.host,
+          port: rt.port,
+          instance_type: rt.instance_type,
+          state: rt.state,
+        });
+      }
+
+      await query("UPDATE runtimes SET state = 'stopped', updated_at = NOW() WHERE id = $1", [rt.id]);
+      console.warn(`[runtimes] Stale runtime row detected for ${user_id} (${rt.container_name}), creating fresh runtime`);
     }
 
     const limits = PLAN_LIMITS[plan] || PLAN_LIMITS.free;
@@ -91,12 +106,15 @@ router.get('/:userId', async (req, res, next) => {
     if (!rows.length) return res.status(404).json({ error: 'No running runtime' });
 
     const rt = rows[0];
-    // Try to get live stats
+    // Try to get live stats; if container is gone, mark row stopped.
     let stats = null;
     try {
       stats = await podman.getContainerStats(rt.container_name, rt.host);
       await query('UPDATE runtimes SET memory_used = $1, updated_at = NOW() WHERE id = $2', [stats.memoryUsed, rt.id]);
-    } catch { /* container might be transitioning */ }
+    } catch {
+      await query("UPDATE runtimes SET state = 'stopped', updated_at = NOW() WHERE id = $1", [rt.id]);
+      return res.status(404).json({ error: 'No running runtime' });
+    }
 
     res.json({ ...rt, stats });
   } catch (err) { next(err); }

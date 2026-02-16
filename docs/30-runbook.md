@@ -101,11 +101,25 @@ ssh -i ~/.ssh/feuille-key.pem ubuntu@$HOST '
 '
 ```
 
-## 5) Database quick checks
+## 5) Analytics (Umami)
 
-Target DB: `markco` on local Postgres.
+```bash
+systemctl status umami
+sudo journalctl -u umami -f
+sudo systemctl restart umami
+```
 
-High-value tables:
+Dashboard: `https://markco.dev/analytics/`
+
+Umami runs as a Podman container (`ghcr.io/umami-software/umami:postgresql-latest`) on port 3005.
+Caddy routes `/analytics/*`, `/script.js`, and `/api/send` to it.
+
+## 6) Database quick checks
+
+Platform DB: `markco` on local Postgres.
+Analytics DB: `umami` on local Postgres (separate database, managed by Umami).
+
+High-value tables (markco DB):
 - `users`
 - `sessions`
 - `invites`
@@ -113,7 +127,7 @@ High-value tables:
 - `snapshots`
 - `migrations`
 
-## 6) Escalation notes
+## 7) Escalation notes
 
 - If sync path breaks, prioritize data safety and disable affected access path until WS proxy is confirmed healthy.
 - If migration chain fails, keep user on local runtime and avoid repeated migration loops.

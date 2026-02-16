@@ -55,8 +55,8 @@ if [[ -n "$TOKEN" ]]; then
     ws_url="${BASE_URL/http:/ws:}"
     ws_url="${ws_url/https:/wss:}"
     info "Checking websocket /events with websocat"
-    timeout 6 websocat -1 "$ws_url/events?token=$TOKEN" >/tmp/feuille-smoke-ws.log 2>/dev/null || true
-    if ! grep -q 'connected' /tmp/feuille-smoke-ws.log 2>/dev/null; then
+    timeout 6 websocat -1 "$ws_url/events?token=$TOKEN" >/tmp/markco-smoke-ws.log 2>/dev/null || true
+    if ! grep -q 'connected' /tmp/markco-smoke-ws.log 2>/dev/null; then
       warn "No explicit websocket welcome message observed (check manually if needed)"
     fi
   else

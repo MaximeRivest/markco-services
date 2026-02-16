@@ -64,8 +64,82 @@ async function start() {
   });
 
   // WebSocket proxy for editor containers (/u/{userId}/events, /u/{userId}/sync/...)
+  // and sync-relay routing when SYNC_MODE is mirror or relay_primary
   const { WebSocketServer } = await import('ws');
   const wss = new WebSocketServer({ noServer: true });
+
+  const SYNC_MODE = process.env.SYNC_MODE || 'legacy';
+  const SYNC_RELAY_PORT = parseInt(process.env.SYNC_RELAY_PORT || '3006', 10);
+  console.log(`[orchestrator] SYNC_MODE=${SYNC_MODE}, relay port=${SYNC_RELAY_PORT}`);
+
+  /**
+   * Create a bidirectional WebSocket proxy with buffering and error handling.
+   * Phase 0 improvement: proper error handling to prevent "socket hang up" spam.
+   */
+  function createWsProxy(clientWs, targetUrl, opts = {}) {
+    const { headers = {} } = opts;
+    const upstream = new WebSocket(targetUrl, { headers });
+    const buffered = [];
+    let upstreamOpen = false;
+    let clientClosed = false;
+    let upstreamClosed = false;
+
+    clientWs.on('message', (data, isBinary) => {
+      if (upstreamOpen && upstream.readyState === WebSocket.OPEN) {
+        try { upstream.send(data, { binary: isBinary }); } catch { /* closing */ }
+      } else if (!upstreamClosed) {
+        buffered.push({ data, isBinary });
+      }
+    });
+
+    upstream.on('open', () => {
+      upstreamOpen = true;
+      for (const msg of buffered) {
+        try { upstream.send(msg.data, { binary: msg.isBinary }); } catch { /* closing */ }
+      }
+      buffered.length = 0;
+    });
+
+    upstream.on('message', (data, isBinary) => {
+      if (!clientClosed && clientWs.readyState === 1) {
+        try { clientWs.send(data, { binary: isBinary }); } catch { /* closing */ }
+      }
+    });
+
+    clientWs.on('close', () => {
+      clientClosed = true;
+      if (!upstreamClosed) {
+        try { upstream.close(); } catch { /* ignore */ }
+      }
+    });
+
+    upstream.on('close', () => {
+      upstreamClosed = true;
+      if (!clientClosed) {
+        try { clientWs.close(); } catch { /* ignore */ }
+      }
+    });
+
+    clientWs.on('error', (err) => {
+      if (!upstreamClosed) {
+        try { upstream.close(); } catch { /* ignore */ }
+      }
+    });
+
+    upstream.on('error', (err) => {
+      // Phase 0: log concisely instead of full stack trace
+      if (err.code !== 'ECONNREFUSED') {
+        console.warn(`[ws-proxy] Upstream error (${targetUrl}): ${err.code || err.message}`);
+      } else {
+        console.error(`[ws-proxy] Upstream refused: ${targetUrl}`);
+      }
+      if (!clientClosed) {
+        try { clientWs.close(); } catch { /* ignore */ }
+      }
+    });
+
+    return upstream;
+  }
 
   server.on('upgrade', async (req, socket, head) => {
     const url = new URL(req.url, 'http://localhost');
@@ -86,44 +160,92 @@ async function start() {
     const token = cookies.session_token || url.searchParams.get('token');
     if (!token) { socket.destroy(); return; }
 
+    let validatedUser;
     try {
-      await authService.validate(token);
+      validatedUser = await authService.validate(token);
     } catch { socket.destroy(); return; }
 
+    // ── Sync relay routing ──────────────────────────────────────────────
+    // Match sync paths: /u/:userId/sync/:port/:docPath  (legacy format)
+    // In relay_primary mode, route to sync-relay instead of editor container.
+    const syncMatch = rest?.match(/^\/sync\/(\d+)\/(.+)$/);
+
+    if (syncMatch && (SYNC_MODE === 'relay_primary' || SYNC_MODE === 'mirror')) {
+      const [, legacySyncPort, docPathRaw] = syncMatch;
+
+      // For relay routing, we need to map the legacy URL format to relay format.
+      // Legacy: /sync/:port/:docPath → Relay: /sync/:userId/:project/:docPath
+      // We extract project from the editor context (for now, use "default" as fallback).
+      // The editor container sends the project name as part of the doc path.
+      // TODO: once the editor sends project info, parse it here.
+      const project = 'default';
+      const docPath = docPathRaw;
+
+      if (SYNC_MODE === 'relay_primary') {
+        // Route directly to sync relay
+        const relayUrl = `ws://localhost:${SYNC_RELAY_PORT}/sync/${userId}/${project}/${docPath}`;
+
+        wss.handleUpgrade(req, socket, head, (clientWs) => {
+          createWsProxy(clientWs, relayUrl, {
+            headers: { 'X-User-Id': userId },
+          });
+        });
+        return;
+      }
+
+      if (SYNC_MODE === 'mirror') {
+        // Primary path: editor container (legacy)
+        // Secondary: also mirror to sync relay for durability
+        const editor = getEditorInfo(userId);
+        if (!editor) { socket.destroy(); return; }
+
+        const editorUrl = `ws://localhost:${editor.editorPort}${rest}${url.search}`;
+        const relayUrl = `ws://localhost:${SYNC_RELAY_PORT}/sync/${userId}/${project}/${docPath}`;
+
+        wss.handleUpgrade(req, socket, head, (clientWs) => {
+          // Primary: proxy to editor as usual
+          const upstream = createWsProxy(clientWs, editorUrl);
+
+          // Mirror: open a parallel connection to the relay to persist state
+          // The relay connection receives all updates but doesn't send back to client
+          const mirror = new WebSocket(relayUrl, {
+            headers: { 'X-User-Id': userId },
+          });
+
+          // Forward Yjs updates to mirror (binary messages only)
+          upstream.on('message', (data, isBinary) => {
+            if (isBinary && mirror.readyState === WebSocket.OPEN) {
+              try { mirror.send(data, { binary: true }); } catch { /* ignore */ }
+            }
+          });
+
+          // Also forward client messages to mirror
+          clientWs.on('message', (data, isBinary) => {
+            if (isBinary && mirror.readyState === WebSocket.OPEN) {
+              try { mirror.send(data, { binary: true }); } catch { /* ignore */ }
+            }
+          });
+
+          // Clean up mirror on close
+          clientWs.on('close', () => {
+            try { mirror.close(); } catch { /* ignore */ }
+          });
+          mirror.on('error', (err) => {
+            console.warn(`[ws-mirror] Relay mirror error: ${err.message}`);
+          });
+        });
+        return;
+      }
+    }
+
+    // ── Default: proxy to editor container ──────────────────────────────
     const editor = getEditorInfo(userId);
     if (!editor) { socket.destroy(); return; }
 
-    // Accept client WebSocket first, then connect upstream
     const targetUrl = `ws://localhost:${editor.editorPort}${rest}${url.search}`;
 
     wss.handleUpgrade(req, socket, head, (clientWs) => {
-      const upstream = new WebSocket(targetUrl);
-      const buffered = [];
-
-      clientWs.on('message', (data, isBinary) => {
-        if (upstream.readyState === WebSocket.OPEN) {
-          upstream.send(data, { binary: isBinary });
-        } else {
-          buffered.push({ data, isBinary });
-        }
-      });
-
-      upstream.on('open', () => {
-        for (const msg of buffered) upstream.send(msg.data, { binary: msg.isBinary });
-        buffered.length = 0;
-      });
-
-      upstream.on('message', (data, isBinary) => {
-        if (clientWs.readyState === 1) clientWs.send(data, { binary: isBinary });
-      });
-
-      clientWs.on('close', () => upstream.close());
-      upstream.on('close', () => clientWs.close());
-      clientWs.on('error', () => upstream.close());
-      upstream.on('error', (err) => {
-        console.error(`[ws-proxy] Upstream error for ${targetUrl}: ${err.message}`);
-        clientWs.close();
-      });
+      createWsProxy(clientWs, targetUrl);
     });
   });
 

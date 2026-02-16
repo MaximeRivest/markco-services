@@ -3,10 +3,10 @@
  * Handles auth flow, dashboard, and user editor proxying.
  */
 
-import { readFile } from 'node:fs/promises';
+import { readFile, rm } from 'node:fs/promises';
 import { Router } from 'express';
-import { authService } from '../service-client.js';
-import { onUserLogin, onUserLogout, getEditorInfo } from '../user-lifecycle.js';
+import { authService, computeManager } from '../service-client.js';
+import { onUserLogin, onUserLogout, getEditorInfo, notifyRuntimePortChange } from '../user-lifecycle.js';
 
 const router = Router();
 
@@ -1027,6 +1027,149 @@ router.get('/', async (req, res) => {
   return res.send(renderPage('markco.dev — Markdown notebooks with code, collaboration, and publishing', body, { landing: true }));
 });
 
+// ── GET /privacy ─────────────────────────────────────────────────────
+router.get('/privacy', (_req, res) => {
+  const body = `<div class="page-card"><main class="card">
+    <h1>Privacy Policy</h1>
+    <p>Last updated: 2026-02-15</p>
+    <p>MarkCo provides markdown notebooks with code execution and publishing. This page applies to markco.dev and the Android app wrapper.</p>
+
+    <h2 style="margin-top:18px">What we collect</h2>
+    <p>When you sign in, we collect account identifiers (for example GitHub/Google ID, name, email, avatar), session tokens, and basic operational logs needed to run the service.</p>
+
+    <h2 style="margin-top:18px">Notebook content</h2>
+    <p>Your notebooks and execution outputs are stored to provide the product features (editing, running, syncing, and publishing when requested by you).</p>
+
+    <h2 style="margin-top:18px">Analytics</h2>
+    <p>We may use privacy-focused aggregate analytics to understand usage and improve reliability. We do not sell personal data.</p>
+
+    <h2 style="margin-top:18px">Contact</h2>
+    <p>Questions: <a href="mailto:hello@markco.dev">hello@markco.dev</a></p>
+
+    <h2 style="margin-top:18px">Account deletion</h2>
+    <p>Request or perform account deletion at <a href="/account-delete">markco.dev/account-delete</a>.</p>
+
+    <div class="row" style="margin-top:20px">
+      <a class="btn ghost" href="/account-delete">Delete account</a>
+      <a class="btn ghost" href="/">Back to home</a>
+    </div>
+  </main></div>`;
+
+  return res.send(renderPage('markco.dev — Privacy Policy', body));
+});
+
+// ── GET /terms ───────────────────────────────────────────────────────
+router.get('/terms', (_req, res) => {
+  const body = `<div class="page-card"><main class="card">
+    <h1>Terms of Service</h1>
+    <p>Last updated: 2026-02-15</p>
+    <p>By using MarkCo, you agree to use the service lawfully and responsibly.</p>
+
+    <h2 style="margin-top:18px">Acceptable use</h2>
+    <p>Do not use the service to violate laws, abuse infrastructure, or access data you do not own.</p>
+
+    <h2 style="margin-top:18px">Availability</h2>
+    <p>The service is provided as-is and may change over time. We may suspend access to protect platform security and reliability.</p>
+
+    <h2 style="margin-top:18px">Contact</h2>
+    <p>Questions: <a href="mailto:hello@markco.dev">hello@markco.dev</a></p>
+
+    <div class="row" style="margin-top:20px">
+      <a class="btn ghost" href="/">Back to home</a>
+    </div>
+  </main></div>`;
+
+  return res.send(renderPage('markco.dev — Terms of Service', body));
+});
+
+// ── GET /account-delete ──────────────────────────────────────────────
+router.get('/account-delete', async (req, res) => {
+  let user = null;
+  const token = extractToken(req);
+
+  if (token) {
+    try {
+      const validated = await authService.validate(token);
+      user = validated.user || null;
+    } catch {
+      // show public instructions only
+    }
+  }
+
+  const signedInSection = user ? `
+    <h2 style="margin-top:18px">Delete now</h2>
+    <p>Signed in as <code>${escapeHtml(user.email || user.username || user.id)}</code>.</p>
+    <p>This will permanently delete your MarkCo account, active sessions, and workspace data.</p>
+    <button id="delete-account-btn" class="btn primary" type="button">Delete account permanently</button>
+    <p id="delete-account-status" class="meta" style="margin-top:10px"></p>
+    <script>
+      (() => {
+        const btn = document.getElementById('delete-account-btn');
+        const status = document.getElementById('delete-account-status');
+        if (!btn) return;
+
+        btn.addEventListener('click', async () => {
+          const confirmed = confirm('Delete your MarkCo account and associated data permanently? This cannot be undone.');
+          if (!confirmed) return;
+
+          btn.disabled = true;
+          btn.textContent = 'Deleting...';
+          status.textContent = 'Deleting account...';
+
+          try {
+            const res = await fetch('/api/account/delete', { method: 'POST', credentials: 'include' });
+            if (!res.ok) {
+              let detail = 'Request failed';
+              try {
+                const json = await res.json();
+                detail = json.error || detail;
+              } catch {}
+              throw new Error(detail);
+            }
+
+            status.textContent = 'Account deleted. Redirecting...';
+            setTimeout(() => {
+              window.location.href = '/?account_deleted=1';
+            }, 500);
+          } catch (err) {
+            status.textContent = 'Could not delete account: ' + (err?.message || err);
+            btn.disabled = false;
+            btn.textContent = 'Delete account permanently';
+          }
+        });
+      })();
+    </script>
+  ` : `
+    <h2 style="margin-top:18px">Delete by request</h2>
+    <p>Sign in first to self-delete instantly, or send a deletion request to
+       <a href="mailto:hello@markco.dev?subject=MarkCo%20account%20deletion%20request">hello@markco.dev</a>
+       from the email address associated with your account.</p>
+    <div class="row" style="margin-top:12px">
+      <a class="btn primary" href="/login">Sign in to delete now</a>
+    </div>
+  `;
+
+  const body = `<div class="page-card"><main class="card">
+    <h1>Delete your MarkCo account</h1>
+    <p>Use this page to request deletion of your MarkCo account and associated notebook data.</p>
+
+    ${signedInSection}
+
+    <h2 style="margin-top:18px">What gets deleted</h2>
+    <p>Your user profile, active sessions, and workspace files stored by MarkCo.</p>
+
+    <h2 style="margin-top:18px">Retention</h2>
+    <p>Operational backups may persist for up to 30 days before permanent removal.</p>
+
+    <div class="row" style="margin-top:20px">
+      <a class="btn ghost" href="/privacy">Privacy policy</a>
+      <a class="btn ghost" href="/">Back to home</a>
+    </div>
+  </main></div>`;
+
+  return res.send(renderPage('markco.dev — Delete account', body));
+});
+
 // ── GET /login ────────────────────────────────────────────────────────
 router.get('/login', async (req, res) => {
   const existingToken = extractToken(req);
@@ -1194,6 +1337,7 @@ router.get('/dashboard', requireAuth, async (req, res) => {
         <form method="post" action="/logout" id="logout-form" style="margin:0">
           <button class="btn" type="submit">Logout</button>
         </form>
+        <a class="btn ghost" href="/account-delete">Delete account</a>
       </div>
 
       <p class="meta">Plan: <code>${escapeHtml(user.plan || 'free')}</code></p>
@@ -1226,6 +1370,143 @@ router.get('/dashboard', requireAuth, async (req, res) => {
       }
       : null,
   });
+});
+
+// ── POST /api/runtime/recover ──────────────────────────────────────
+// Force-recover the current user's Python runtime and hot-update editor routing.
+router.post('/api/runtime/recover', requireAuth, async (req, res) => {
+  const user = req.user;
+  let editor = getEditorInfo(user.id);
+
+  // Ensure editor exists
+  if (!editor) {
+    try {
+      await onUserLogin(user);
+      editor = getEditorInfo(user.id);
+    } catch (err) {
+      console.error('[runtime:recover] Failed to start editor:', err.message);
+      return res.status(500).json({ error: 'Editor unavailable' });
+    }
+  }
+
+  // Fast path: if current runtime responds, no-op
+  if (editor?.runtimePort) {
+    try {
+      const caps = await fetch(`http://127.0.0.1:${editor.runtimePort}/mrp/v1/capabilities`, {
+        signal: AbortSignal.timeout(3000),
+      });
+      if (caps.ok) {
+        return res.json({ ok: true, recovered: false, port: editor.runtimePort });
+      }
+    } catch {
+      // continue to recovery path
+    }
+  }
+
+  try {
+    const probeRuntime = async (port, timeoutMs = 20000) => {
+      const start = Date.now();
+      while (Date.now() - start < timeoutMs) {
+        try {
+          const caps = await fetch(`http://127.0.0.1:${port}/mrp/v1/capabilities`, {
+            signal: AbortSignal.timeout(3000),
+          });
+          if (caps.ok) return true;
+        } catch {
+          // keep polling until timeout
+        }
+        await new Promise(r => setTimeout(r, 500));
+      }
+      return false;
+    };
+
+    let runtime = await computeManager.startRuntime(user.id, user.plan || 'free');
+
+    // If compute-manager returned a "running" runtime that still doesn't answer,
+    // force a fresh runtime once.
+    let reachable = false;
+    try {
+      reachable = await probeRuntime(runtime.port);
+    } catch {
+      reachable = false;
+    }
+
+    if (!reachable) {
+      console.warn(`[runtime:recover] Runtime ${runtime.container_name} not reachable on ${runtime.port}, recreating`);
+      try {
+        await computeManager.stopRuntime(user.id);
+      } catch {
+        // best effort
+      }
+      runtime = await computeManager.startRuntime(user.id, user.plan || 'free');
+
+      reachable = false;
+      try {
+        reachable = await probeRuntime(runtime.port);
+      } catch {
+        reachable = false;
+      }
+      if (!reachable) {
+        throw new Error(`Recovered runtime is still unreachable on port ${runtime.port}`);
+      }
+    }
+
+    // Update in-memory editor mapping
+    if (editor) {
+      editor.runtimeId = runtime.runtime_id;
+      editor.runtimeContainer = runtime.container_name;
+      editor.runtimePort = runtime.port;
+      editor.plan = user.plan || 'free';
+    }
+
+    // Tell mrmd-server to route Python requests to the new runtime port
+    await notifyRuntimePortChange(user.id, runtime.port, runtime.host || 'localhost');
+
+    return res.json({
+      ok: true,
+      recovered: true,
+      runtime: {
+        id: runtime.runtime_id,
+        container_name: runtime.container_name,
+        host: runtime.host,
+        port: runtime.port,
+        state: runtime.state,
+      },
+    });
+  } catch (err) {
+    console.error('[runtime:recover] Recovery failed:', err.message);
+    return res.status(502).json({ error: 'Runtime recovery failed', detail: err.message });
+  }
+});
+
+// ── POST /api/account/delete ────────────────────────────────────────
+router.post('/api/account/delete', requireAuth, async (req, res) => {
+  const userId = req.user.id;
+
+  try {
+    await onUserLogout(userId);
+  } catch (err) {
+    console.warn('[account-delete] Lifecycle cleanup warning:', err.message);
+  }
+
+  try {
+    await authService.deleteAccount(req.sessionToken);
+  } catch (err) {
+    console.error('[account-delete] Auth delete failed:', err.message);
+    return res.status(502).json({ error: 'Unable to delete account right now' });
+  }
+
+  clearSessionCookie(res);
+
+  const dataDir = process.env.DATA_DIR || '/data/users';
+  const userDir = `${dataDir}/${userId}`;
+  try {
+    await rm(userDir, { recursive: true, force: true });
+  } catch (err) {
+    console.warn('[account-delete] Failed to remove user directory:', err.message);
+  }
+
+  return res.json({ ok: true, deleted_user_id: userId });
 });
 
 // ── POST /logout & /api/logout ───────────────────────────────────────

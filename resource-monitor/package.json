@@ -1,5 +1,5 @@
 {
-  "name": "@feuille/resource-monitor",
+  "name": "@markco/resource-monitor",
   "version": "0.1.0",
   "private": true,
   "type": "module",

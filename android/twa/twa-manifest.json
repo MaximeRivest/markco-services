@@ -1,0 +1,60 @@
+{
+  "packageId": "dev.markco.app",
+  "host": "markco.dev",
+  "name": "MarkCo",
+  "launcherName": "MarkCo",
+  "display": "standalone",
+  "themeColor": "#1E1E1E",
+  "themeColorDark": "#000000",
+  "navigationColor": "#000000",
+  "navigationColorDark": "#000000",
+  "navigationDividerColor": "#000000",
+  "navigationDividerColorDark": "#000000",
+  "backgroundColor": "#1E1E1E",
+  "enableNotifications": true,
+  "startUrl": "/?source=pwa",
+  "iconUrl": "https://markco.dev/pwa/icon-512.png",
+  "maskableIconUrl": "https://markco.dev/pwa/icon-512.png",
+  "splashScreenFadeOutDuration": 300,
+  "signingKey": {
+    "path": "/home/maxime/.config/markco-android/markco-release.keystore",
+    "alias": "markco-release"
+  },
+  "appVersionName": "2",
+  "appVersionCode": 2,
+  "shortcuts": [
+    {
+      "name": "Open Sandbox",
+      "shortName": "Sandbox",
+      "url": "https://markco.dev/sandbox",
+      "chosenIconUrl": "https://markco.dev/pwa/icon-128.png"
+    },
+    {
+      "name": "Login",
+      "shortName": "Login",
+      "url": "https://markco.dev/login",
+      "chosenIconUrl": "https://markco.dev/pwa/icon-128.png"
+    }
+  ],
+  "generatorApp": "bubblewrap-cli",
+  "webManifestUrl": "https://markco.dev/manifest.webmanifest",
+  "fallbackType": "customtabs",
+  "features": {},
+  "alphaDependencies": {
+    "enabled": false
+  },
+  "enableSiteSettingsShortcut": true,
+  "isChromeOSOnly": false,
+  "isMetaQuest": false,
+  "fullScopeUrl": "https://markco.dev/",
+  "minSdkVersion": 21,
+  "orientation": "any",
+  "fingerprints": [],
+  "additionalTrustedOrigins": [],
+  "retainedBundles": [],
+  "protocolHandlers": [],
+  "fileHandlers": [],
+  "launchHandlerClientMode": "",
+  "displayOverride": [],
+  "appVersion": "2"
+}
