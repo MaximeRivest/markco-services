@@ -22,6 +22,8 @@ const SANDBOX_AI_UPSTREAM = (
   || 'http://127.0.0.1:51790'
 ).replace(/\/$/, '');
 
+const SYNC_RELAY_PORT = parseInt(process.env.SYNC_RELAY_PORT || '3006', 10);
+
 const SANDBOX_AI_FORWARD_HEADERS = new Set([
   'content-type',
   'accept',
@@ -1401,6 +1403,43 @@ router.get('/dashboard', requireAuth, async (req, res) => {
       }
       : null,
   });
+});
+
+// ── GET /api/sync/documents ─────────────────────────────────────────
+// Proxy to sync-relay document API for the authenticated user.
+// Query:
+//   ?project=<name>   (optional)
+//   ?content=1        include text content
+//   ?yjs=1            include Yjs state (base64)
+router.get('/api/sync/documents', requireAuth, async (req, res) => {
+  const userId = req.user.id;
+  const project = req.query.project ? String(req.query.project) : null;
+
+  const qs = new URLSearchParams();
+  if (String(req.query.content || '') === '1') qs.set('content', '1');
+  if (String(req.query.yjs || '') === '1') qs.set('yjs', '1');
+
+  let relayUrl = `http://127.0.0.1:${SYNC_RELAY_PORT}/api/documents/${encodeURIComponent(userId)}`;
+  if (project) relayUrl += `/${encodeURIComponent(project)}`;
+  const query = qs.toString();
+  if (query) relayUrl += `?${query}`;
+
+  try {
+    const upstream = await fetch(relayUrl, {
+      headers: {
+        'X-User-Id': userId,
+      },
+      signal: AbortSignal.timeout(15000),
+    });
+
+    const body = await upstream.text();
+    res.status(upstream.status);
+    res.setHeader('Content-Type', upstream.headers.get('content-type') || 'application/json');
+    return res.send(body);
+  } catch (err) {
+    console.error('[api/sync/documents] proxy error:', err.message);
+    return res.status(502).json({ error: 'sync-relay unavailable' });
+  }
 });
 
 // ── POST /api/runtime/recover ──────────────────────────────────────
