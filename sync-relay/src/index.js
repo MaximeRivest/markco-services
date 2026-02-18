@@ -249,14 +249,25 @@ async function handleApiRequest(req, res, url) {
 //
 // Room key: userId (one tunnel per user — the provider handles all projects)
 
-/** @type {Map<string, { provider: WebSocket|null, consumers: Set<WebSocket> }>} */
+/** @type {Map<string, { provider: WebSocket|null, providerMeta: object|null, consumers: Set<WebSocket> }>} */
 const tunnelRooms = new Map();
 
 function getTunnelRoom(userId) {
   if (!tunnelRooms.has(userId)) {
-    tunnelRooms.set(userId, { provider: null, consumers: new Set() });
+    tunnelRooms.set(userId, { provider: null, providerMeta: null, consumers: new Set() });
   }
   return tunnelRooms.get(userId);
+}
+
+function buildProviderMeta(req, url, existing = {}) {
+  return {
+    machineId: url.searchParams.get('machine_id') || existing.machineId || null,
+    machineName: url.searchParams.get('machine_name') || existing.machineName || null,
+    hostname: url.searchParams.get('hostname') || existing.hostname || null,
+    capabilities: existing.capabilities || [],
+    connectedAt: existing.connectedAt || new Date().toISOString(),
+    lastSeenAt: new Date().toISOString(),
+  };
 }
 
 /**
@@ -291,11 +302,42 @@ function handleTunnelConnection(ws, req) {
       try { room.provider.close(1000, 'Replaced by new provider'); } catch {}
     }
     room.provider = ws;
-    console.log(`[tunnel] Provider connected for user ${userId}`);
+    room.providerMeta = buildProviderMeta(req, url, room.providerMeta || {});
+    console.log(`[tunnel] Provider connected for user ${userId} (${room.providerMeta.machineName || room.providerMeta.machineId || 'unknown-machine'})`);
+
+    // Notify existing consumers that provider is now available
+    const status = JSON.stringify({
+      t: 'provider-status',
+      available: true,
+      provider: room.providerMeta,
+    });
+    for (const consumer of room.consumers) {
+      if (consumer.readyState === 1) {
+        try { consumer.send(status); } catch {}
+      }
+    }
 
     ws.on('message', (data) => {
-      // Forward provider messages to all consumers
       const msg = typeof data === 'string' ? data : data.toString();
+
+      // Capture provider metadata updates
+      try {
+        const parsed = JSON.parse(msg);
+        if (parsed?.t === 'provider-info') {
+          room.providerMeta = {
+            ...(room.providerMeta || {}),
+            capabilities: parsed.capabilities || room.providerMeta?.capabilities || [],
+            machineId: parsed.machineId || room.providerMeta?.machineId || null,
+            machineName: parsed.machineName || room.providerMeta?.machineName || null,
+            hostname: parsed.hostname || room.providerMeta?.hostname || null,
+            lastSeenAt: new Date().toISOString(),
+          };
+        }
+      } catch {
+        // Ignore non-JSON messages
+      }
+
+      // Forward provider messages to all consumers
       for (const consumer of room.consumers) {
         if (consumer.readyState === 1) {
           try { consumer.send(msg); } catch {}
@@ -323,6 +365,7 @@ function handleTunnelConnection(ws, req) {
     const status = JSON.stringify({
       t: 'provider-status',
       available: !!(room.provider && room.provider.readyState === 1),
+      provider: room.providerMeta || null,
     });
     ws.send(status);
 
@@ -363,7 +406,11 @@ async function handleTunnelApiRequest(req, res, url) {
   const available = !!(room?.provider && room.provider.readyState === 1);
 
   res.writeHead(200, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({ available, consumers: room?.consumers.size || 0 }));
+  res.end(JSON.stringify({
+    available,
+    consumers: room?.consumers.size || 0,
+    provider: available ? (room?.providerMeta || null) : null,
+  }));
   return true;
 }
 
