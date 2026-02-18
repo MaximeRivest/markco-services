@@ -1,493 +1,371 @@
 /**
- * Sync Relay — persistent Yjs sync service for markco.dev
+ * Sync Relay — markco.dev's persistent sync service
  *
- * Manages Yjs documents in memory with Postgres persistence.
- * Accepts authenticated WebSocket connections for real-time sync.
- * Documents survive container/editor restarts.
+ * This is a thin wrapper that starts mrmd-sync with:
+ *   - Postgres storage backend (instead of filesystem)
+ *   - Auth via X-User-Id (proxy) or session token (direct)
+ *   - Multi-user document routing (userId/project/docPath)
+ *   - HTTP API for listing/fetching documents (used by editor container seeding)
  *
- * WebSocket path: /sync/:userId/:project/:docPath
- * HTTP endpoints: /health, /stats, /api/documents/:userId, /api/documents/:userId/:project
+ * It is NOT a separate Yjs implementation — it IS mrmd-sync.
+ * Same code that runs on desktop, same protocol, just different storage.
  */
 
-import http from 'http';
-import express from 'express';
-import { WebSocketServer } from 'ws';
-import * as Y from 'yjs';
-import * as syncProtocol from 'y-protocols/sync';
-import * as awarenessProtocol from 'y-protocols/awareness';
-import * as encoding from 'lib0/encoding';
-import * as decoding from 'lib0/decoding';
-import { initSchema, healthCheck as dbHealthCheck } from './db.js';
-import { loadDocument, saveDocument, listUserDocuments, listProjectDocuments } from './yjs-store.js';
+import pg from 'pg';
+import { readFileSync } from 'fs';
+import { dirname, join } from 'path';
+import { fileURLToPath } from 'url';
+import { createServer } from 'mrmd-sync';
+import { createPostgresStorage } from 'mrmd-sync/src/storage-postgres.js';
 
+const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = parseInt(process.env.SYNC_RELAY_PORT || process.env.PORT || '3006', 10);
-const SAVE_DEBOUNCE_MS = parseInt(process.env.SAVE_DEBOUNCE_MS || '2000', 10);
-const DOC_CLEANUP_DELAY_MS = parseInt(process.env.DOC_CLEANUP_DELAY_MS || '60000', 10);
-const PING_INTERVAL_MS = 30000;
-const MAX_CONNECTIONS = 200;
 
-// Yjs message types
-const MSG_SYNC = 0;
-const MSG_AWARENESS = 1;
+// ─── Database ───────────────────────────────────────────────────────────────
 
-// ─── Metrics ────────────────────────────────────────────────────────────────
-
-const metrics = {
-  connectionsOpened: 0,
-  connectionsClosed: 0,
-  activeConnections: 0,
-  messagesReceived: 0,
-  messagesSent: 0,
-  documentsLoaded: 0,
-  documentsSaved: 0,
-  saveErrors: 0,
-  errors: 0,
-  startedAt: new Date().toISOString(),
-};
-
-// ─── Document Store (in-memory with Postgres backing) ───────────────────────
-
-/** Map of "userId/project/docPath" → DocEntry */
-const docs = new Map();
-
-/**
- * @typedef {Object} DocEntry
- * @property {string} key
- * @property {string} userId
- * @property {string} project
- * @property {string} docPath
- * @property {Y.Doc} ydoc
- * @property {Y.Text} ytext
- * @property {awarenessProtocol.Awareness} awareness
- * @property {Set<import('ws').WebSocket>} conns
- * @property {NodeJS.Timeout|null} saveTimeout
- * @property {NodeJS.Timeout|null} cleanupTimeout
- * @property {boolean} dirty
- */
-
-function docKey(userId, project, docPath) {
-  return `${userId}/${project}/${docPath}`;
-}
-
-/**
- * Get or create a document, loading from Postgres if needed.
- */
-async function getDoc(userId, project, docPath) {
-  const key = docKey(userId, project, docPath);
-
-  if (docs.has(key)) {
-    const entry = docs.get(key);
-    // Cancel cleanup if it was scheduled
-    if (entry.cleanupTimeout) {
-      clearTimeout(entry.cleanupTimeout);
-      entry.cleanupTimeout = null;
-    }
-    return entry;
-  }
-
-  // Create new Y.Doc and try to load from Postgres
-  const ydoc = new Y.Doc();
-  const awareness = new awarenessProtocol.Awareness(ydoc);
-  const ytext = ydoc.getText('content');
-
-  try {
-    const { yjsState } = await loadDocument(userId, project, docPath);
-    if (yjsState && yjsState.byteLength > 0) {
-      Y.applyUpdate(ydoc, yjsState);
-      console.log(`[sync-relay] Loaded doc from DB: ${key} (${yjsState.byteLength} bytes)`);
-    }
-    metrics.documentsLoaded++;
-  } catch (err) {
-    console.error(`[sync-relay] Error loading doc ${key}:`, err.message);
-    metrics.errors++;
-  }
-
-  const entry = {
-    key,
-    userId,
-    project,
-    docPath,
-    ydoc,
-    ytext,
-    awareness,
-    conns: new Set(),
-    saveTimeout: null,
-    cleanupTimeout: null,
-    dirty: false,
-  };
-
-  // Schedule save on any update
-  ydoc.on('update', () => {
-    entry.dirty = true;
-    scheduleSave(entry);
-  });
-
-  docs.set(key, entry);
-  return entry;
-}
-
-/**
- * Debounced save to Postgres.
- */
-function scheduleSave(entry) {
-  if (entry.saveTimeout) return; // already scheduled
-
-  entry.saveTimeout = setTimeout(async () => {
-    entry.saveTimeout = null;
-    if (!entry.dirty) return;
-
-    try {
-      const yjsState = Y.encodeStateAsUpdate(entry.ydoc);
-      const text = entry.ytext.toString();
-      await saveDocument(entry.userId, entry.project, entry.docPath, yjsState, text);
-      entry.dirty = false;
-      metrics.documentsSaved++;
-    } catch (err) {
-      console.error(`[sync-relay] Save error for ${entry.key}:`, err.message);
-      metrics.saveErrors++;
-      metrics.errors++;
-      // Retry on next update
-    }
-  }, SAVE_DEBOUNCE_MS);
-}
-
-/**
- * Immediately flush a document to Postgres.
- */
-async function flushDoc(entry) {
-  if (entry.saveTimeout) {
-    clearTimeout(entry.saveTimeout);
-    entry.saveTimeout = null;
-  }
-
-  if (!entry.dirty) return;
-
-  try {
-    const yjsState = Y.encodeStateAsUpdate(entry.ydoc);
-    const text = entry.ytext.toString();
-    await saveDocument(entry.userId, entry.project, entry.docPath, yjsState, text);
-    entry.dirty = false;
-    metrics.documentsSaved++;
-  } catch (err) {
-    console.error(`[sync-relay] Flush error for ${entry.key}:`, err.message);
-    metrics.saveErrors++;
-    metrics.errors++;
-  }
-}
-
-/**
- * Schedule cleanup for a document after all clients disconnect.
- */
-function scheduleCleanup(entry) {
-  if (entry.cleanupTimeout) return;
-
-  entry.cleanupTimeout = setTimeout(async () => {
-    if (entry.conns.size > 0) return; // someone reconnected
-
-    // Flush to DB, then destroy
-    await flushDoc(entry);
-    entry.awareness.destroy();
-    entry.ydoc.destroy();
-    docs.delete(entry.key);
-    console.log(`[sync-relay] Cleaned up doc: ${entry.key}`);
-  }, DOC_CLEANUP_DELAY_MS);
-}
-
-// ─── WebSocket Helpers ──────────────────────────────────────────────────────
-
-function safeSend(ws, data) {
-  try {
-    if (ws.readyState === 1) { // OPEN
-      ws.send(data, { binary: true });
-      metrics.messagesSent++;
-    }
-  } catch {
-    // Ignore send errors on closing connections
-  }
-}
-
-// ─── Express App (HTTP endpoints) ───────────────────────────────────────────
-
-const app = express();
-app.use(express.json());
-
-app.get('/health', async (_req, res) => {
-  try {
-    await dbHealthCheck();
-    res.json({ status: 'ok', service: 'sync-relay' });
-  } catch (err) {
-    res.status(503).json({ status: 'unhealthy', error: err.message });
-  }
+const pool = new pg.Pool({
+  connectionString: process.env.DATABASE_URL || 'postgresql://localhost:5432/markco',
+  max: 10,
+  idleTimeoutMillis: 30000,
 });
 
-app.get('/stats', (_req, res) => {
-  res.json({
-    ...metrics,
-    documentsInMemory: docs.size,
-    documents: Array.from(docs.values()).map(d => ({
-      key: d.key,
-      connections: d.conns.size,
-      dirty: d.dirty,
-      contentLength: d.ytext.toString().length,
-    })),
-  });
+pool.on('error', (err) => {
+  console.error('[sync-relay] Pool error:', err.message);
 });
 
-// List documents for a user
-app.get('/api/documents/:userId', async (req, res) => {
-  try {
-    const rows = await listUserDocuments(req.params.userId);
-    res.json(rows);
-  } catch (err) {
-    console.error('[sync-relay] List docs error:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// List documents in a project
-app.get('/api/documents/:userId/:project', async (req, res) => {
-  try {
-    const rows = await listProjectDocuments(req.params.userId, req.params.project);
-    res.json(rows);
-  } catch (err) {
-    console.error('[sync-relay] List project docs error:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─── HTTP + WebSocket Server ────────────────────────────────────────────────
-
-const server = http.createServer(app);
-const wss = new WebSocketServer({ noServer: true });
-
-/**
- * Parse the sync WebSocket URL.
- * Expected: /sync/:userId/:project/:docPath(+)
- * docPath can contain slashes for nested docs (e.g. 02-analysis/01-data)
- */
-function parseSyncUrl(pathname) {
-  // Remove leading /sync/
-  const match = pathname.match(/^\/sync\/([^/]+)\/([^/]+)\/(.+)$/);
-  if (!match) return null;
-  return {
-    userId: match[1],
-    project: match[2],
-    docPath: match[3],
-  };
+async function initSchema() {
+  const sql = readFileSync(join(__dirname, 'schema.sql'), 'utf-8');
+  await pool.query(sql);
+  console.log('[sync-relay] Schema initialized');
 }
 
-server.on('upgrade', async (req, socket, head) => {
-  const url = new URL(req.url, 'http://localhost');
-  const parsed = parseSyncUrl(url.pathname);
+// ─── Auth ───────────────────────────────────────────────────────────────────
 
-  if (!parsed) {
-    socket.destroy();
-    return;
+const AUTH_SERVICE_URL = process.env.AUTH_SERVICE_URL || 'http://localhost:3001';
+const tokenValidationCache = new Map();
+
+function extractBearerToken(req) {
+  const authHeader = req.headers['authorization'];
+  if (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
+    return authHeader.slice('Bearer '.length).trim();
+  }
+  return null;
+}
+
+function getDocUserId(docName) {
+  if (!docName) return null;
+  const [uid] = docName.split('/');
+  return uid || null;
+}
+
+async function validateToken(token) {
+  const now = Date.now();
+  const cached = tokenValidationCache.get(token);
+  if (cached && cached.expiresAt > now) {
+    return cached.userId;
   }
 
-  const { userId, project, docPath } = parsed;
+  try {
+    const res = await fetch(`${AUTH_SERVICE_URL}/auth/validate`, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(5000),
+    });
 
-  // Auth: check X-User-Id header (set by orchestrator proxy) or token query param
+    if (!res.ok) {
+      tokenValidationCache.set(token, { userId: null, expiresAt: now + 10000 });
+      return null;
+    }
+
+    const data = await res.json();
+    const userId = data?.user?.id || null;
+    tokenValidationCache.set(token, { userId, expiresAt: now + 60000 });
+    return userId;
+  } catch (err) {
+    console.warn('[sync-relay] Token validation failed:', err.message);
+    tokenValidationCache.set(token, { userId: null, expiresAt: now + 5000 });
+    return null;
+  }
+}
+
+/**
+ * Auth hook for mrmd-sync WebSocket connections.
+ */
+async function authHandler(req, docName) {
+  if (process.env.SYNC_RELAY_NO_AUTH === '1') return true;
+
   const headerUserId = req.headers['x-user-id'];
+  const url = new URL(req.url, 'http://localhost');
   const tokenParam = url.searchParams.get('token');
+  const bearerToken = extractBearerToken(req);
+  const token = bearerToken || tokenParam;
 
-  // In proxy mode (from orchestrator), trust X-User-Id header
-  // The orchestrator has already validated the session cookie
-  if (headerUserId && headerUserId !== userId) {
-    console.warn(`[sync-relay] Auth mismatch: header=${headerUserId}, url=${userId}`);
-    socket.destroy();
-    return;
+  const docUserId = getDocUserId(docName);
+
+  // Trusted proxy path: orchestrator already validated cookie.
+  if (headerUserId) {
+    return !docUserId || docUserId === headerUserId;
   }
 
-  // If no X-User-Id and no token, reject (unless auth is disabled for dev)
-  if (!headerUserId && !tokenParam && process.env.SYNC_RELAY_NO_AUTH !== '1') {
-    socket.destroy();
-    return;
-  }
+  // Direct path: validate session token against auth-service.
+  if (!token) return false;
 
-  // Rate limit: max connections
-  if (metrics.activeConnections >= MAX_CONNECTIONS) {
-    console.warn('[sync-relay] Max connections reached, rejecting');
-    socket.destroy();
-    return;
-  }
+  const validatedUserId = await validateToken(token);
+  if (!validatedUserId) return false;
 
-  wss.handleUpgrade(req, socket, head, async (ws) => {
-    try {
-      await handleConnection(ws, userId, project, docPath);
-    } catch (err) {
-      console.error(`[sync-relay] Connection setup error for ${userId}/${project}/${docPath}:`, err.message);
-      ws.close(1011, 'Internal error');
-    }
-  });
-});
+  // Enforce tenant isolation in room path.
+  return !docUserId || docUserId === validatedUserId;
+}
+
+// ─── HTTP API for document listing ──────────────────────────────────────────
 
 /**
- * Handle a new WebSocket connection for a document.
+ * Authenticate HTTP API requests.
+ * Accepts X-User-Id header (trusted internal) or Bearer token.
+ * Returns the validated userId or null.
  */
-async function handleConnection(ws, userId, project, docPath) {
-  const entry = await getDoc(userId, project, docPath);
-  const { ydoc, awareness, conns } = entry;
+async function authenticateHttpRequest(req) {
+  if (process.env.SYNC_RELAY_NO_AUTH === '1') return 'anonymous';
 
-  metrics.connectionsOpened++;
-  metrics.activeConnections++;
-  conns.add(ws);
+  const headerUserId = req.headers['x-user-id'];
+  if (headerUserId) return headerUserId;
 
-  console.log(`[sync-relay] Client connected: ${entry.key} (${conns.size} clients)`);
+  const bearerToken = extractBearerToken(req);
+  const url = new URL(req.url, 'http://localhost');
+  const tokenParam = url.searchParams.get('token');
+  const token = bearerToken || tokenParam;
 
-  // Heartbeat
-  let isAlive = true;
-  ws.on('pong', () => { isAlive = true; });
-  const pingInterval = setInterval(() => {
-    if (!isAlive) {
-      ws.terminate();
-      return;
-    }
-    isAlive = false;
-    try { ws.ping(); } catch { /* ignore */ }
-  }, PING_INTERVAL_MS);
-
-  // Send sync step 1
-  const syncEncoder = encoding.createEncoder();
-  encoding.writeVarUint(syncEncoder, MSG_SYNC);
-  syncProtocol.writeSyncStep1(syncEncoder, ydoc);
-  safeSend(ws, encoding.toUint8Array(syncEncoder));
-
-  // Send current awareness states
-  const awarenessStates = awareness.getStates();
-  if (awarenessStates.size > 0) {
-    const awarenessEncoder = encoding.createEncoder();
-    encoding.writeVarUint(awarenessEncoder, MSG_AWARENESS);
-    encoding.writeVarUint8Array(
-      awarenessEncoder,
-      awarenessProtocol.encodeAwarenessUpdate(awareness, Array.from(awarenessStates.keys()))
-    );
-    safeSend(ws, encoding.toUint8Array(awarenessEncoder));
-  }
-
-  // Message handler
-  ws.on('message', (rawMessage) => {
-    try {
-      const data = new Uint8Array(rawMessage);
-      metrics.messagesReceived++;
-
-      const decoder = decoding.createDecoder(data);
-      const msgType = decoding.readVarUint(decoder);
-
-      switch (msgType) {
-        case MSG_SYNC: {
-          const responseEncoder = encoding.createEncoder();
-          encoding.writeVarUint(responseEncoder, MSG_SYNC);
-          syncProtocol.readSyncMessage(decoder, responseEncoder, ydoc, ws);
-          if (encoding.length(responseEncoder) > 1) {
-            safeSend(ws, encoding.toUint8Array(responseEncoder));
-          }
-          break;
-        }
-        case MSG_AWARENESS: {
-          awarenessProtocol.applyAwarenessUpdate(
-            awareness,
-            decoding.readVarUint8Array(decoder),
-            ws
-          );
-          break;
-        }
-      }
-    } catch (err) {
-      console.error(`[sync-relay] Message error for ${entry.key}:`, err.message);
-      metrics.errors++;
-    }
-  });
-
-  // Broadcast updates to other clients
-  const updateHandler = (update, origin) => {
-    const broadcastEncoder = encoding.createEncoder();
-    encoding.writeVarUint(broadcastEncoder, MSG_SYNC);
-    syncProtocol.writeUpdate(broadcastEncoder, update);
-    const msg = encoding.toUint8Array(broadcastEncoder);
-
-    for (const conn of conns) {
-      if (conn !== origin) {
-        safeSend(conn, msg);
-      }
-    }
-  };
-  ydoc.on('update', updateHandler);
-
-  // Broadcast awareness changes
-  const awarenessHandler = ({ added, updated, removed }) => {
-    const changedClients = [...added, ...updated, ...removed];
-    const awarenessEncoder = encoding.createEncoder();
-    encoding.writeVarUint(awarenessEncoder, MSG_AWARENESS);
-    encoding.writeVarUint8Array(
-      awarenessEncoder,
-      awarenessProtocol.encodeAwarenessUpdate(awareness, changedClients)
-    );
-    const msg = encoding.toUint8Array(awarenessEncoder);
-    for (const conn of conns) {
-      safeSend(conn, msg);
-    }
-  };
-  awareness.on('update', awarenessHandler);
-
-  // Cleanup on close
-  ws.on('close', () => {
-    clearInterval(pingInterval);
-    metrics.connectionsClosed++;
-    metrics.activeConnections--;
-    conns.delete(ws);
-    ydoc.off('update', updateHandler);
-    awareness.off('update', awarenessHandler);
-    awarenessProtocol.removeAwarenessStates(awareness, [ydoc.clientID], null);
-
-    console.log(`[sync-relay] Client disconnected: ${entry.key} (${conns.size} clients)`);
-
-    if (conns.size === 0) {
-      scheduleCleanup(entry);
-    }
-  });
-
-  ws.on('error', (err) => {
-    console.error(`[sync-relay] WS error for ${entry.key}:`, err.message);
-    metrics.errors++;
-  });
+  if (!token) return null;
+  return await validateToken(token);
 }
 
-// ─── Graceful Shutdown ──────────────────────────────────────────────────────
+/**
+ * Handle HTTP API requests for document listing.
+ * Returns true if the request was handled, false to fall through.
+ */
+async function handleApiRequest(req, res, url) {
+  // Only handle /api/documents/* paths
+  const match = url.pathname.match(/^\/api\/documents\/([^/]+)(?:\/([^/]+))?$/);
+  if (!match) return false;
 
-let isShuttingDown = false;
+  const [, requestedUserId, project] = match;
 
-async function shutdown(signal) {
-  if (isShuttingDown) return;
-  isShuttingDown = true;
-  console.log(`[sync-relay] ${signal} received, shutting down...`);
+  // Authenticate
+  const authedUserId = await authenticateHttpRequest(req);
+  if (!authedUserId) {
+    res.writeHead(401, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Unauthorized' }));
+    return true;
+  }
 
-  // Close all WebSocket connections
-  for (const entry of docs.values()) {
-    for (const ws of entry.conns) {
-      try { ws.close(1001, 'Server shutting down'); } catch { /* ignore */ }
+  // Enforce tenant isolation: can only list own documents
+  if (authedUserId !== 'anonymous' && authedUserId !== requestedUserId) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Forbidden' }));
+    return true;
+  }
+
+  const includeContent = url.searchParams.get('content') === '1';
+  const includeYjs = url.searchParams.get('yjs') === '1';
+
+  try {
+    let query, params;
+
+    if (project) {
+      // List docs in a specific project
+      const selectCols = ['doc_path', 'content_hash', 'byte_size', 'updated_at'];
+      if (includeContent) selectCols.push('content_text');
+      if (includeYjs) selectCols.push('encode(yjs_state, \'base64\') as yjs_state_b64');
+
+      query = `SELECT ${selectCols.join(', ')} FROM documents
+               WHERE user_id = $1 AND project = $2
+               ORDER BY doc_path`;
+      params = [requestedUserId, project];
+    } else {
+      // List all projects and their doc counts
+      query = `SELECT project, doc_path, content_hash, byte_size, updated_at
+               FROM documents
+               WHERE user_id = $1
+               ORDER BY project, doc_path`;
+      params = [requestedUserId];
     }
+
+    const { rows } = await pool.query(query, params);
+
+    if (project) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        userId: requestedUserId,
+        project,
+        documents: rows.map(r => ({
+          docPath: r.doc_path,
+          contentHash: r.content_hash,
+          byteSize: r.byte_size,
+          updatedAt: r.updated_at,
+          ...(includeContent && { content: r.content_text }),
+          ...(includeYjs && { yjsState: r.yjs_state_b64 }),
+        })),
+      }));
+    } else {
+      // Group by project
+      const projects = {};
+      for (const row of rows) {
+        if (!projects[row.project]) {
+          projects[row.project] = { docCount: 0, documents: [] };
+        }
+        projects[row.project].docCount++;
+        projects[row.project].documents.push({
+          docPath: row.doc_path,
+          contentHash: row.content_hash,
+          byteSize: row.byte_size,
+          updatedAt: row.updated_at,
+        });
+      }
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        userId: requestedUserId,
+        projects,
+      }));
+    }
+
+    return true;
+  } catch (err) {
+    console.error('[sync-relay] API error:', err.message);
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Internal server error' }));
+    return true;
   }
-
-  // Flush all dirty documents to Postgres
-  console.log(`[sync-relay] Flushing ${docs.size} documents...`);
-  const flushPromises = Array.from(docs.values()).map(entry => flushDoc(entry));
-  await Promise.allSettled(flushPromises);
-
-  // Destroy all Y.Docs
-  for (const entry of docs.values()) {
-    entry.awareness.destroy();
-    entry.ydoc.destroy();
-  }
-  docs.clear();
-
-  // Close server
-  server.close();
-  console.log('[sync-relay] Shutdown complete');
 }
 
-process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('SIGINT', () => shutdown('SIGINT'));
+// ─── Runtime Tunnel ─────────────────────────────────────────────────────────
+//
+// Allows the Electron desktop app to expose its local runtime (bash, PTY,
+// Python) to the web editor via the relay. When the Electron has a project
+// open, it connects to ws://relay/tunnel/<userId> as a "provider". The web
+// editor connects as a "consumer". Messages are forwarded between them.
+//
+// Protocol: JSON text messages. See runtime-tunnel.js for message types.
+// PTY data is base64-encoded inside JSON for simplicity.
+//
+// Room key: userId (one tunnel per user — the provider handles all projects)
+
+/** @type {Map<string, { provider: WebSocket|null, consumers: Set<WebSocket> }>} */
+const tunnelRooms = new Map();
+
+function getTunnelRoom(userId) {
+  if (!tunnelRooms.has(userId)) {
+    tunnelRooms.set(userId, { provider: null, consumers: new Set() });
+  }
+  return tunnelRooms.get(userId);
+}
+
+/**
+ * Handle a WebSocket connection to /tunnel/<userId>.
+ * The first query param `role=provider` marks the Electron side.
+ * All others are consumers (web editor).
+ */
+function handleTunnelConnection(ws, req) {
+  const url = new URL(req.url, 'http://localhost');
+  const pathParts = url.pathname.replace(/^\/tunnel\/?/, '').split('/');
+  const userId = decodeURIComponent(pathParts[0] || '');
+
+  if (!userId) {
+    ws.close(1008, 'Missing userId in tunnel path');
+    return;
+  }
+
+  // Auth: X-User-Id header or validated token
+  const headerUserId = req.headers['x-user-id'];
+  if (headerUserId && headerUserId !== userId) {
+    ws.close(1008, 'User ID mismatch');
+    return;
+  }
+
+  const role = url.searchParams.get('role');
+  const room = getTunnelRoom(userId);
+
+  if (role === 'provider') {
+    // Electron desktop app
+    if (room.provider && room.provider.readyState === 1) {
+      // Replace stale provider
+      try { room.provider.close(1000, 'Replaced by new provider'); } catch {}
+    }
+    room.provider = ws;
+    console.log(`[tunnel] Provider connected for user ${userId}`);
+
+    ws.on('message', (data) => {
+      // Forward provider messages to all consumers
+      const msg = typeof data === 'string' ? data : data.toString();
+      for (const consumer of room.consumers) {
+        if (consumer.readyState === 1) {
+          try { consumer.send(msg); } catch {}
+        }
+      }
+    });
+
+    ws.on('close', () => {
+      if (room.provider === ws) {
+        room.provider = null;
+        console.log(`[tunnel] Provider disconnected for user ${userId}`);
+        // Notify consumers that provider is gone
+        const gone = JSON.stringify({ t: 'provider-gone' });
+        for (const consumer of room.consumers) {
+          try { consumer.send(gone); } catch {}
+        }
+      }
+    });
+  } else {
+    // Web editor (consumer)
+    room.consumers.add(ws);
+    console.log(`[tunnel] Consumer connected for user ${userId} (${room.consumers.size} total)`);
+
+    // Tell consumer if provider is available
+    const status = JSON.stringify({
+      t: 'provider-status',
+      available: !!(room.provider && room.provider.readyState === 1),
+    });
+    ws.send(status);
+
+    ws.on('message', (data) => {
+      // Forward consumer messages to provider
+      if (room.provider && room.provider.readyState === 1) {
+        const msg = typeof data === 'string' ? data : data.toString();
+        try { room.provider.send(msg); } catch {}
+      }
+    });
+
+    ws.on('close', () => {
+      room.consumers.delete(ws);
+      console.log(`[tunnel] Consumer disconnected for user ${userId} (${room.consumers.size} remaining)`);
+    });
+  }
+
+  ws.on('error', () => { /* handled by close */ });
+}
+
+/**
+ * Handle tunnel status HTTP API.
+ * GET /api/tunnel/<userId> → { available: bool, consumers: number }
+ */
+async function handleTunnelApiRequest(req, res, url) {
+  const match = url.pathname.match(/^\/api\/tunnel\/([^/]+)$/);
+  if (!match) return false;
+
+  const userId = decodeURIComponent(match[1]);
+  const authedUserId = await authenticateHttpRequest(req);
+  if (!authedUserId) {
+    res.writeHead(401, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Unauthorized' }));
+    return true;
+  }
+
+  const room = tunnelRooms.get(userId);
+  const available = !!(room?.provider && room.provider.readyState === 1);
+
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ available, consumers: room?.consumers.size || 0 }));
+  return true;
+}
 
 // ─── Start ──────────────────────────────────────────────────────────────────
 
@@ -497,11 +375,43 @@ async function start() {
   // Initialize DB schema
   await initSchema();
 
-  server.listen(PORT, () => {
-    console.log(`[sync-relay] Listening on :${PORT}`);
-    console.log(`[sync-relay] WebSocket: ws://localhost:${PORT}/sync/:userId/:project/:docPath`);
-    console.log(`[sync-relay] Health: http://localhost:${PORT}/health`);
+  // Create Postgres storage backend
+  const storage = createPostgresStorage({ pool });
+
+  // Start mrmd-sync with Postgres storage + custom HTTP handler + tunnel
+  const server = createServer({
+    dir: '/tmp/sync-relay-noop',
+    port: PORT,
+    auth: authHandler,
+    storage,
+    pathPrefix: '/sync',
+    onRequest: async (req, res, url) => {
+      // Try tunnel API first
+      if (await handleTunnelApiRequest(req, res, url)) return true;
+      // Then document API
+      return handleApiRequest(req, res, url);
+    },
+    onConnection: async (ws, req) => {
+      const url = new URL(req.url, 'http://localhost');
+      if (url.pathname.startsWith('/tunnel/')) {
+        handleTunnelConnection(ws, req);
+        return true; // Handled — don't pass to Yjs handler
+      }
+      return false;
+    },
+    debounceMs: 2000,
+    maxConnections: 200,
+    docCleanupDelayMs: 60000,
+    dangerouslyAllowSystemPaths: true,
+    logLevel: process.env.LOG_LEVEL || 'info',
+    persistYjsState: false,
   });
+
+  console.log(`[sync-relay] Listening on :${PORT}`);
+  console.log(`[sync-relay] Storage: postgres`);
+  console.log(`[sync-relay] WebSocket: ws://localhost:${PORT}/sync/<userId>/<project>/<docPath>`);
+  console.log(`[sync-relay] Tunnel: ws://localhost:${PORT}/tunnel/<userId>?role=provider|consumer`);
+  console.log(`[sync-relay] HTTP API: http://localhost:${PORT}/api/documents/<userId>[/<project>]`);
 }
 
 start().catch(err => {

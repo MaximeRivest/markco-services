@@ -11,11 +11,7 @@
     "db:init": "psql $DATABASE_URL -f src/schema.sql"
   },
   "dependencies": {
-    "express": "^4.21.0",
-    "pg": "^8.13.0",
-    "ws": "^8.18.0",
-    "yjs": "^13.6.0",
-    "y-protocols": "^1.0.6",
-    "lib0": "^0.2.0"
+    "mrmd-sync": "file:../../mrmd-sync",
+    "pg": "^8.13.0"
   }
 }

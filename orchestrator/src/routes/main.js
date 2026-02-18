@@ -815,6 +815,14 @@ async function completeLogin(res, user, token, expiresAt) {
     expires: new Date(expiresAt),
   }));
 
+  // Check if this is an Electron auth flow
+  const isElectron = res.req?.cookies?.electron_auth === '1';
+  if (isElectron) {
+    res.clearCookie('electron_auth');
+    // Don't start editor containers for Electron auth — just return the token
+    return res.redirect(`/auth/electron/success?token=${encodeURIComponent(token)}`);
+  }
+
   try {
     await onUserLogin(user);
   } catch (err) {
@@ -1216,9 +1224,13 @@ router.get('/login', async (req, res) => {
 });
 
 // ── GET /login/github ─────────────────────────────────────────────────
-router.get('/login/github', (_req, res) => {
+router.get('/login/github', (req, res) => {
   if (!GITHUB_CLIENT_ID) {
     return res.status(500).send('GitHub OAuth is not configured');
+  }
+  // If electron=1, remember it so completeLogin redirects to /auth/electron/success
+  if (req.query.electron === '1') {
+    res.cookie('electron_auth', '1', { httpOnly: true, maxAge: 600000, sameSite: 'lax' });
   }
   return res.redirect(githubOAuthUrl());
 });
@@ -1229,6 +1241,25 @@ router.get('/login/google', (_req, res) => {
     return res.status(500).send('Google OAuth is not configured');
   }
   return res.redirect(googleOAuthUrl());
+});
+
+// ── GET /auth/electron/success — Electron app reads token from this page ──
+router.get('/auth/electron/success', (req, res) => {
+  const token = req.query.token;
+  if (!token) return res.status(400).send('Missing token');
+
+  // This page is only shown briefly in Electron's auth window.
+  // Electron watches for this URL, extracts the token, and closes the window.
+  res.type('html').send(`<!DOCTYPE html>
+<html><head><title>Sign in successful</title></head>
+<body style="font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#0d1117;color:#c9d1d9">
+<div style="text-align:center">
+<h1 style="color:#58a6ff">✓ Signed in to MarkCo</h1>
+<p>You can close this window and return to the app.</p>
+<p style="color:#484f58;font-size:12px">If this window doesn't close automatically, copy this token:</p>
+<code id="token" style="color:#484f58;font-size:10px;word-break:break-all">${token}</code>
+</div>
+</body></html>`);
 });
 
 // ── GET /auth/callback/github ─────────────────────────────────────────

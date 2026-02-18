@@ -72,6 +72,42 @@ async function start() {
   const SYNC_RELAY_PORT = parseInt(process.env.SYNC_RELAY_PORT || '3006', 10);
   console.log(`[orchestrator] SYNC_MODE=${SYNC_MODE}, relay port=${SYNC_RELAY_PORT}`);
 
+  // Throttle repeated upstream WS errors (stale sync ports can reconnect rapidly).
+  const WS_ERROR_LOG_WINDOW_MS = 15000;
+  const wsErrorLogState = new Map();
+
+  function pruneWsErrorLogState() {
+    if (wsErrorLogState.size < 300) return;
+    const cutoff = Date.now() - (WS_ERROR_LOG_WINDOW_MS * 4);
+    for (const [key, value] of wsErrorLogState.entries()) {
+      if (value.lastAt < cutoff) wsErrorLogState.delete(key);
+    }
+  }
+
+  function logWsProxyError(targetUrl, err, level = 'warn') {
+    const code = err?.code || err?.message || 'unknown';
+    const key = `${targetUrl}|${code}`;
+    const now = Date.now();
+    const prev = wsErrorLogState.get(key);
+
+    if (!prev || (now - prev.lastAt) > WS_ERROR_LOG_WINDOW_MS) {
+      const suppressed = prev?.suppressed || 0;
+      const suffix = suppressed > 0 ? ` (suppressed ${suppressed} repeats)` : '';
+      if (level === 'error') {
+        console.error(`[ws-proxy] Upstream error (${targetUrl}): ${code}${suffix}`);
+      } else {
+        console.warn(`[ws-proxy] Upstream error (${targetUrl}): ${code}${suffix}`);
+      }
+      wsErrorLogState.set(key, { lastAt: now, suppressed: 0 });
+      pruneWsErrorLogState();
+      return;
+    }
+
+    prev.suppressed += 1;
+    wsErrorLogState.set(key, prev);
+    pruneWsErrorLogState();
+  }
+
   /**
    * Create a bidirectional WebSocket proxy with buffering and error handling.
    * Phase 0 improvement: proper error handling to prevent "socket hang up" spam.
@@ -127,11 +163,11 @@ async function start() {
     });
 
     upstream.on('error', (err) => {
-      // Phase 0: log concisely instead of full stack trace
-      if (err.code !== 'ECONNREFUSED') {
-        console.warn(`[ws-proxy] Upstream error (${targetUrl}): ${err.code || err.message}`);
+      // Phase 0 + follow-up: concise + throttled logging to avoid reconnect noise.
+      if (err.code === 'ECONNREFUSED') {
+        logWsProxyError(targetUrl, { code: 'ECONNREFUSED' }, 'error');
       } else {
-        console.error(`[ws-proxy] Upstream refused: ${targetUrl}`);
+        logWsProxyError(targetUrl, err, 'warn');
       }
       if (!clientClosed) {
         try { clientWs.close(); } catch { /* ignore */ }
@@ -143,6 +179,87 @@ async function start() {
 
   server.on('upgrade', async (req, socket, head) => {
     const url = new URL(req.url, 'http://localhost');
+
+    // Authenticate via cookie/query/bearer token
+    const cookies = {};
+    (req.headers.cookie || '').split(';').forEach(c => {
+      const [k, v] = c.trim().split('=');
+      if (k) cookies[k] = v;
+    });
+    const authHeader = req.headers.authorization || '';
+    const bearerToken = authHeader.startsWith('Bearer ')
+      ? authHeader.slice('Bearer '.length).trim()
+      : null;
+    const token = cookies.session_token || url.searchParams.get('token') || bearerToken;
+
+    // ── Direct relay path for desktop/mobile clients ─────────────────────
+    // Path: /sync/:userId/:project/:docPath
+    // This avoids going through /u/:userId/... and editor container routing.
+    const directSyncMatch = url.pathname.match(/^\/sync\/([^/]+)\/([^/]+)\/(.+)$/);
+    if (directSyncMatch) {
+      if (!token) { socket.destroy(); return; }
+
+      const [, userIdRaw] = directSyncMatch;
+      const userId = decodeURIComponent(userIdRaw);
+
+      let validatedUser;
+      try {
+        validatedUser = await authService.validate(token);
+      } catch {
+        socket.destroy();
+        return;
+      }
+
+      const validatedUserId = validatedUser?.user?.id;
+      if (!validatedUserId || validatedUserId !== userId) {
+        socket.destroy();
+        return;
+      }
+
+      const relayUrl = `ws://localhost:${SYNC_RELAY_PORT}${url.pathname}${url.search}`;
+      wss.handleUpgrade(req, socket, head, (clientWs) => {
+        createWsProxy(clientWs, relayUrl, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'X-User-Id': userId,
+          },
+        });
+      });
+      return;
+    }
+
+    // ── Runtime tunnel path for desktop → relay → editor ─────────────────
+    // Path: /tunnel/:userId?role=provider|consumer
+    const tunnelMatch = url.pathname.match(/^\/tunnel\/([^/]+)$/);
+    if (tunnelMatch) {
+      if (!token) { socket.destroy(); return; }
+
+      const userId = decodeURIComponent(tunnelMatch[1]);
+      let validatedUser;
+      try {
+        validatedUser = await authService.validate(token);
+      } catch {
+        socket.destroy();
+        return;
+      }
+
+      const validatedUserId = validatedUser?.user?.id;
+      if (!validatedUserId || validatedUserId !== userId) {
+        socket.destroy();
+        return;
+      }
+
+      const tunnelUrl = `ws://localhost:${SYNC_RELAY_PORT}/tunnel/${encodeURIComponent(userId)}${url.search}`;
+      wss.handleUpgrade(req, socket, head, (clientWs) => {
+        createWsProxy(clientWs, tunnelUrl, {
+          headers: {
+            'X-User-Id': userId,
+          },
+        });
+      });
+      return;
+    }
+
     const match = url.pathname.match(/^\/u\/([^/]+)(\/.*)?$/);
     if (!match) {
       socket.destroy();
@@ -151,13 +268,6 @@ async function start() {
 
     const [, userId, rest = '/'] = match;
 
-    // Authenticate via cookie
-    const cookies = {};
-    (req.headers.cookie || '').split(';').forEach(c => {
-      const [k, v] = c.trim().split('=');
-      if (k) cookies[k] = v;
-    });
-    const token = cookies.session_token || url.searchParams.get('token');
     if (!token) { socket.destroy(); return; }
 
     let validatedUser;
@@ -196,6 +306,8 @@ async function start() {
       if (SYNC_MODE === 'mirror') {
         // Primary path: editor container (legacy)
         // Secondary: also mirror to sync relay for durability
+        // IMPORTANT: only open mirror AFTER upstream connects successfully
+        // to prevent reconnect storms when the editor's internal sync port is stale
         const editor = getEditorInfo(userId);
         if (!editor) { socket.destroy(); return; }
 
@@ -206,32 +318,40 @@ async function start() {
           // Primary: proxy to editor as usual
           const upstream = createWsProxy(clientWs, editorUrl);
 
-          // Mirror: open a parallel connection to the relay to persist state
-          // The relay connection receives all updates but doesn't send back to client
-          const mirror = new WebSocket(relayUrl, {
-            headers: { 'X-User-Id': userId },
+          // Mirror: only open after upstream is connected
+          let mirror = null;
+
+          upstream.on('open', () => {
+            // Now safe to open the mirror — upstream is alive
+            mirror = new WebSocket(relayUrl, {
+              headers: { 'X-User-Id': userId },
+            });
+
+            mirror.on('error', (err) => {
+              // Mirror errors are non-fatal — primary sync still works
+              if (err.code !== 'ECONNREFUSED') {
+                console.warn(`[ws-mirror] Relay error: ${err.code || err.message}`);
+              }
+            });
           });
 
           // Forward Yjs updates to mirror (binary messages only)
           upstream.on('message', (data, isBinary) => {
-            if (isBinary && mirror.readyState === WebSocket.OPEN) {
+            if (isBinary && mirror?.readyState === WebSocket.OPEN) {
               try { mirror.send(data, { binary: true }); } catch { /* ignore */ }
             }
           });
 
           // Also forward client messages to mirror
           clientWs.on('message', (data, isBinary) => {
-            if (isBinary && mirror.readyState === WebSocket.OPEN) {
+            if (isBinary && mirror?.readyState === WebSocket.OPEN) {
               try { mirror.send(data, { binary: true }); } catch { /* ignore */ }
             }
           });
 
           // Clean up mirror on close
           clientWs.on('close', () => {
-            try { mirror.close(); } catch { /* ignore */ }
-          });
-          mirror.on('error', (err) => {
-            console.warn(`[ws-mirror] Relay mirror error: ${err.message}`);
+            if (mirror) try { mirror.close(); } catch { /* ignore */ }
           });
         });
         return;
