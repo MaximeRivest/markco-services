@@ -447,7 +447,7 @@ async function start() {
       return false;
     },
     debounceMs: 2000,
-    maxConnections: 200,
+    maxConnections: 2000,
     docCleanupDelayMs: 60000,
     dangerouslyAllowSystemPaths: true,
     logLevel: process.env.LOG_LEVEL || 'info',
