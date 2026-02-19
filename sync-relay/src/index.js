@@ -237,6 +237,301 @@ async function handleApiRequest(req, res, url) {
   }
 }
 
+// ─── Machine Registry + File Catalog ────────────────────────────────────────
+//
+// Machines push lightweight file manifests so the web editor can browse
+// projects from all connected machines without needing per-doc WebSocket
+// bridges for every file.
+
+/**
+ * Upsert machine into the registry.
+ */
+async function upsertMachine(userId, machineId, { machineName, hostname, capabilities, status }) {
+  await pool.query(
+    `INSERT INTO machines (user_id, machine_id, machine_name, hostname, capabilities, status, last_seen, connected_at)
+     VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+     ON CONFLICT (user_id, machine_id)
+     DO UPDATE SET machine_name = COALESCE($3, machines.machine_name),
+                   hostname = COALESCE($4, machines.hostname),
+                   capabilities = COALESCE($5, machines.capabilities),
+                   status = $6,
+                   last_seen = NOW(),
+                   connected_at = CASE WHEN $6 = 'online' AND machines.status != 'online'
+                                       THEN NOW() ELSE machines.connected_at END`,
+    [userId, machineId, machineName || null, hostname || null, capabilities || [], status || 'online']
+  );
+}
+
+/**
+ * Set machine offline.
+ */
+async function setMachineOffline(userId, machineId) {
+  await pool.query(
+    `UPDATE machines SET status = 'offline', last_seen = NOW() WHERE user_id = $1 AND machine_id = $2`,
+    [userId, machineId]
+  );
+}
+
+/**
+ * Bulk-replace catalog for a machine. Accepts an array of {project, docPath, contentHash, byteSize}.
+ * Deletes entries that are no longer present (clean diff).
+ */
+async function syncCatalog(userId, machineId, entries) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Delete all existing entries for this machine
+    await client.query(
+      `DELETE FROM catalog WHERE user_id = $1 AND machine_id = $2`,
+      [userId, machineId]
+    );
+
+    // Batch insert new entries (chunks of 500 to stay within param limits)
+    const CHUNK = 500;
+    for (let i = 0; i < entries.length; i += CHUNK) {
+      const chunk = entries.slice(i, i + CHUNK);
+      const values = [];
+      const params = [];
+      let idx = 1;
+      for (const e of chunk) {
+        values.push(`($${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, NOW())`);
+        params.push(userId, machineId, e.project, e.docPath, e.contentHash || null, e.byteSize || 0);
+      }
+      await client.query(
+        `INSERT INTO catalog (user_id, machine_id, project, doc_path, content_hash, byte_size, updated_at)
+         VALUES ${values.join(', ')}`,
+        params
+      );
+    }
+
+    // Also update last_seen on the machine
+    await client.query(
+      `UPDATE machines SET last_seen = NOW() WHERE user_id = $1 AND machine_id = $2`,
+      [userId, machineId]
+    );
+
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Handle catalog + machine HTTP API requests.
+ * Routes:
+ *   POST /api/catalog/<userId>/<machineId>  — bulk upsert file listing
+ *   GET  /api/catalog/<userId>              — list all machines + projects
+ *   GET  /api/catalog/<userId>?project=X    — list docs for project X across machines
+ *   GET  /api/machines/<userId>             — list machines with status
+ */
+async function handleCatalogApiRequest(req, res, url) {
+  // ── POST /api/catalog/<userId>/<machineId> — push file manifest
+  const postMatch = url.pathname.match(/^\/api\/catalog\/([^/]+)\/([^/]+)$/);
+  if (postMatch && req.method === 'POST') {
+    const [, requestedUserId, machineId] = postMatch;
+
+    const authedUserId = await authenticateHttpRequest(req);
+    if (!authedUserId) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Unauthorized' }));
+      return true;
+    }
+    if (authedUserId !== 'anonymous' && authedUserId !== requestedUserId) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Forbidden' }));
+      return true;
+    }
+
+    // Read JSON body
+    let body = '';
+    for await (const chunk of req) body += chunk;
+    let payload;
+    try {
+      payload = JSON.parse(body);
+    } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid JSON' }));
+      return true;
+    }
+
+    const { machineName, hostname, capabilities, entries } = payload;
+    if (!Array.isArray(entries)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'entries array required' }));
+      return true;
+    }
+
+    try {
+      await upsertMachine(requestedUserId, machineId, {
+        machineName, hostname, capabilities, status: 'online',
+      });
+      await syncCatalog(requestedUserId, machineId, entries);
+
+      console.log(`[catalog] Synced ${entries.length} entries for ${machineId} (user ${requestedUserId.slice(0, 8)})`);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, entries: entries.length }));
+    } catch (err) {
+      console.error('[catalog] Sync error:', err.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Internal server error' }));
+    }
+    return true;
+  }
+
+  // ── GET /api/catalog/<userId> — list all machines + their projects/docs
+  const getMatch = url.pathname.match(/^\/api\/catalog\/([^/]+)$/);
+  if (getMatch && req.method === 'GET') {
+    const [, requestedUserId] = getMatch;
+
+    const authedUserId = await authenticateHttpRequest(req);
+    if (!authedUserId) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Unauthorized' }));
+      return true;
+    }
+    if (authedUserId !== 'anonymous' && authedUserId !== requestedUserId) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Forbidden' }));
+      return true;
+    }
+
+    const projectFilter = url.searchParams.get('project');
+
+    try {
+      // Fetch machines
+      const { rows: machineRows } = await pool.query(
+        `SELECT machine_id, machine_name, hostname, capabilities, status, last_seen, connected_at
+         FROM machines WHERE user_id = $1 ORDER BY machine_name, machine_id`,
+        [requestedUserId]
+      );
+
+      // Fetch catalog entries
+      let catalogQuery, catalogParams;
+      if (projectFilter) {
+        catalogQuery = `SELECT machine_id, project, doc_path, content_hash, byte_size, updated_at
+                        FROM catalog WHERE user_id = $1 AND project = $2
+                        ORDER BY machine_id, project, doc_path`;
+        catalogParams = [requestedUserId, projectFilter];
+      } else {
+        catalogQuery = `SELECT machine_id, project, doc_path, content_hash, byte_size, updated_at
+                        FROM catalog WHERE user_id = $1
+                        ORDER BY machine_id, project, doc_path`;
+        catalogParams = [requestedUserId];
+      }
+      const { rows: catalogRows } = await pool.query(catalogQuery, catalogParams);
+
+      // Group catalog by machine → project → docs
+      const catalogByMachine = {};
+      for (const row of catalogRows) {
+        if (!catalogByMachine[row.machine_id]) catalogByMachine[row.machine_id] = {};
+        if (!catalogByMachine[row.machine_id][row.project]) catalogByMachine[row.machine_id][row.project] = [];
+        catalogByMachine[row.machine_id][row.project].push({
+          docPath: row.doc_path,
+          contentHash: row.content_hash,
+          byteSize: row.byte_size,
+          updatedAt: row.updated_at,
+        });
+      }
+
+      const machines = machineRows.map(m => ({
+        machineId: m.machine_id,
+        machineName: m.machine_name,
+        hostname: m.hostname,
+        capabilities: m.capabilities || [],
+        status: m.status,
+        lastSeen: m.last_seen,
+        connectedAt: m.connected_at,
+        projects: Object.entries(catalogByMachine[m.machine_id] || {}).map(([name, docs]) => ({
+          name,
+          docCount: docs.length,
+          documents: docs,
+        })),
+      }));
+
+      // Also include cloud-only projects (in documents table but not in any machine's catalog)
+      const { rows: cloudProjects } = await pool.query(
+        `SELECT DISTINCT project FROM documents WHERE user_id = $1
+         EXCEPT
+         SELECT DISTINCT project FROM catalog WHERE user_id = $1`,
+        [requestedUserId]
+      );
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        userId: requestedUserId,
+        machines,
+        cloudOnlyProjects: cloudProjects.map(r => r.project),
+      }));
+    } catch (err) {
+      console.error('[catalog] Query error:', err.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Internal server error' }));
+    }
+    return true;
+  }
+
+  // ── GET /api/machines/<userId> — compact machine list
+  const machinesMatch = url.pathname.match(/^\/api\/machines\/([^/]+)$/);
+  if (machinesMatch && req.method === 'GET') {
+    const [, requestedUserId] = machinesMatch;
+
+    const authedUserId = await authenticateHttpRequest(req);
+    if (!authedUserId) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Unauthorized' }));
+      return true;
+    }
+    if (authedUserId !== 'anonymous' && authedUserId !== requestedUserId) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Forbidden' }));
+      return true;
+    }
+
+    try {
+      const { rows } = await pool.query(
+        `SELECT m.machine_id, m.machine_name, m.hostname, m.capabilities, m.status,
+                m.last_seen, m.connected_at,
+                COUNT(c.doc_path) as doc_count,
+                COUNT(DISTINCT c.project) as project_count
+         FROM machines m
+         LEFT JOIN catalog c ON c.user_id = m.user_id AND c.machine_id = m.machine_id
+         WHERE m.user_id = $1
+         GROUP BY m.machine_id, m.machine_name, m.hostname, m.capabilities,
+                  m.status, m.last_seen, m.connected_at
+         ORDER BY m.machine_name, m.machine_id`,
+        [requestedUserId]
+      );
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        userId: requestedUserId,
+        machines: rows.map(r => ({
+          machineId: r.machine_id,
+          machineName: r.machine_name,
+          hostname: r.hostname,
+          capabilities: r.capabilities || [],
+          status: r.status,
+          lastSeen: r.last_seen,
+          connectedAt: r.connected_at,
+          projectCount: parseInt(r.project_count, 10),
+          docCount: parseInt(r.doc_count, 10),
+        })),
+      }));
+    } catch (err) {
+      console.error('[machines] Query error:', err.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Internal server error' }));
+    }
+    return true;
+  }
+
+  return false;
+}
+
 // ─── Runtime Tunnel ─────────────────────────────────────────────────────────
 //
 // Allows the Electron desktop app to expose its local runtime (bash, PTY,
@@ -303,7 +598,18 @@ function handleTunnelConnection(ws, req) {
     }
     room.provider = ws;
     room.providerMeta = buildProviderMeta(req, url, room.providerMeta || {});
-    console.log(`[tunnel] Provider connected for user ${userId} (${room.providerMeta.machineName || room.providerMeta.machineId || 'unknown-machine'})`);
+    const _machineId = room.providerMeta.machineId;
+    console.log(`[tunnel] Provider connected for user ${userId} (${room.providerMeta.machineName || _machineId || 'unknown-machine'})`);
+
+    // Register machine as online in the database
+    if (_machineId) {
+      upsertMachine(userId, _machineId, {
+        machineName: room.providerMeta.machineName,
+        hostname: room.providerMeta.hostname,
+        capabilities: room.providerMeta.capabilities,
+        status: 'online',
+      }).catch(err => console.warn('[tunnel] Failed to register machine:', err.message));
+    }
 
     // Notify existing consumers that provider is now available
     const status = JSON.stringify({
@@ -348,11 +654,17 @@ function handleTunnelConnection(ws, req) {
     ws.on('close', () => {
       if (room.provider === ws) {
         room.provider = null;
+        const disconnectedMachineId = room.providerMeta?.machineId;
         console.log(`[tunnel] Provider disconnected for user ${userId}`);
         // Notify consumers that provider is gone
         const gone = JSON.stringify({ t: 'provider-gone' });
         for (const consumer of room.consumers) {
           try { consumer.send(gone); } catch {}
+        }
+        // Mark machine offline in database
+        if (disconnectedMachineId) {
+          setMachineOffline(userId, disconnectedMachineId)
+            .catch(err => console.warn('[tunnel] Failed to set machine offline:', err.message));
         }
       }
     });
@@ -435,6 +747,8 @@ async function start() {
     onRequest: async (req, res, url) => {
       // Try tunnel API first
       if (await handleTunnelApiRequest(req, res, url)) return true;
+      // Then catalog/machine API
+      if (await handleCatalogApiRequest(req, res, url)) return true;
       // Then document API
       return handleApiRequest(req, res, url);
     },
@@ -459,6 +773,8 @@ async function start() {
   console.log(`[sync-relay] WebSocket: ws://localhost:${PORT}/sync/<userId>/<project>/<docPath>`);
   console.log(`[sync-relay] Tunnel: ws://localhost:${PORT}/tunnel/<userId>?role=provider|consumer`);
   console.log(`[sync-relay] HTTP API: http://localhost:${PORT}/api/documents/<userId>[/<project>]`);
+  console.log(`[sync-relay] Catalog: http://localhost:${PORT}/api/catalog/<userId>[/<machineId>]`);
+  console.log(`[sync-relay] Machines: http://localhost:${PORT}/api/machines/<userId>`);
 }
 
 start().catch(err => {

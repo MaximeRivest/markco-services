@@ -1442,6 +1442,55 @@ router.get('/api/sync/documents', requireAuth, async (req, res) => {
   }
 });
 
+// ── GET /api/catalog ────────────────────────────────────────────────
+// Proxy to sync-relay catalog API — list all machines + their file manifests.
+// Query:
+//   ?project=<name>   (optional) filter to a specific project
+router.get('/api/catalog', requireAuth, async (req, res) => {
+  const userId = req.user.id;
+  const project = req.query.project ? String(req.query.project) : null;
+
+  let relayUrl = `http://127.0.0.1:${SYNC_RELAY_PORT}/api/catalog/${encodeURIComponent(userId)}`;
+  if (project) relayUrl += `?project=${encodeURIComponent(project)}`;
+
+  try {
+    const upstream = await fetch(relayUrl, {
+      headers: { 'X-User-Id': userId },
+      signal: AbortSignal.timeout(15000),
+    });
+    const body = await upstream.text();
+    res.status(upstream.status);
+    res.setHeader('Content-Type', upstream.headers.get('content-type') || 'application/json');
+    return res.send(body);
+  } catch (err) {
+    console.error('[api/catalog] proxy error:', err.message);
+    return res.status(502).json({ error: 'sync-relay unavailable' });
+  }
+});
+
+// ── GET /api/machines ──────────────────────────────────────────────
+// Proxy to sync-relay machines API — list connected machines with status.
+router.get('/api/machines', requireAuth, async (req, res) => {
+  const userId = req.user.id;
+
+  try {
+    const upstream = await fetch(
+      `http://127.0.0.1:${SYNC_RELAY_PORT}/api/machines/${encodeURIComponent(userId)}`,
+      {
+        headers: { 'X-User-Id': userId },
+        signal: AbortSignal.timeout(10000),
+      }
+    );
+    const body = await upstream.text();
+    res.status(upstream.status);
+    res.setHeader('Content-Type', upstream.headers.get('content-type') || 'application/json');
+    return res.send(body);
+  } catch (err) {
+    console.error('[api/machines] proxy error:', err.message);
+    return res.status(502).json({ error: 'sync-relay unavailable' });
+  }
+});
+
 // ── POST /api/runtime/recover ──────────────────────────────────────
 // Force-recover the current user's Python runtime and hot-update editor routing.
 router.post('/api/runtime/recover', requireAuth, async (req, res) => {
