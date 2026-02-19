@@ -738,6 +738,54 @@ async function start() {
   const storage = createPostgresStorage({ pool });
 
   // Start mrmd-sync with Postgres storage + custom HTTP handler + tunnel
+  // ── Bridge-on-demand: when a consumer opens a doc, tell the provider to bridge it ──
+  // Rate-limit: don't send duplicate bridge-requests within 60 seconds.
+  const bridgeRequestedRecently = new Map(); // key → expiry timestamp
+  const BRIDGE_REQUEST_TTL_MS = 60000;
+
+  function maybeRequestBridge(urlPath) {
+    // Parse: /sync/<userId>/<project>/<docPath...>
+    const stripped = urlPath.replace(/^\/sync\/?/, '');
+    const parts = stripped.split('/');
+    if (parts.length < 3) return;
+
+    const userId = decodeURIComponent(parts[0]);
+    const project = decodeURIComponent(parts[1]);
+    const docPath = parts.slice(2).map(decodeURIComponent).join('/');
+
+    // Remove query string from last segment
+    const cleanDocPath = docPath.split('?')[0];
+    if (!userId || !project || !cleanDocPath) return;
+
+    const key = `${userId}/${project}/${cleanDocPath}`;
+    const now = Date.now();
+
+    // Rate-limit
+    const expiry = bridgeRequestedRecently.get(key);
+    if (expiry && expiry > now) return;
+    bridgeRequestedRecently.set(key, now + BRIDGE_REQUEST_TTL_MS);
+
+    // Periodic cleanup of expired entries
+    if (bridgeRequestedRecently.size > 1000) {
+      for (const [k, v] of bridgeRequestedRecently) {
+        if (v < now) bridgeRequestedRecently.delete(k);
+      }
+    }
+
+    // Find provider for this user
+    const room = tunnelRooms.get(userId);
+    if (!room?.provider || room.provider.readyState !== 1) return;
+
+    // Send bridge-request to the provider
+    try {
+      room.provider.send(JSON.stringify({
+        t: 'bridge-request',
+        project,
+        docPath: cleanDocPath,
+      }));
+    } catch { /* ignore */ }
+  }
+
   const server = createServer({
     dir: '/tmp/sync-relay-noop',
     port: PORT,
@@ -757,6 +805,10 @@ async function start() {
       if (url.pathname.startsWith('/tunnel/')) {
         handleTunnelConnection(ws, req);
         return true; // Handled — don't pass to Yjs handler
+      }
+      // For sync connections: request on-demand bridging from the provider
+      if (url.pathname.startsWith('/sync/')) {
+        maybeRequestBridge(url.pathname);
       }
       return false;
     },
