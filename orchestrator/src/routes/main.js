@@ -1491,6 +1491,52 @@ router.get('/api/machines', requireAuth, async (req, res) => {
   }
 });
 
+// ── GET /api/machines/active ────────────────────────────────────────
+// Get the active runtime machine for the current user.
+router.get('/api/machines/active', requireAuth, async (req, res) => {
+  const userId = req.user.id;
+  try {
+    const upstream = await fetch(
+      `http://127.0.0.1:${SYNC_RELAY_PORT}/api/tunnel/${encodeURIComponent(userId)}/active`,
+      { headers: { 'X-User-Id': userId }, signal: AbortSignal.timeout(10000) }
+    );
+    const body = await upstream.text();
+    res.status(upstream.status);
+    res.setHeader('Content-Type', upstream.headers.get('content-type') || 'application/json');
+    return res.send(body);
+  } catch (err) {
+    console.error('[api/machines/active] proxy error:', err.message);
+    return res.status(502).json({ error: 'sync-relay unavailable' });
+  }
+});
+
+// ── POST /api/machines/active ──────────────────────────────────────
+// Set the active runtime machine. Body: { machineId: "..." } or { machineId: null } for auto.
+router.post('/api/machines/active', requireAuth, async (req, res) => {
+  const userId = req.user.id;
+  try {
+    const upstream = await fetch(
+      `http://127.0.0.1:${SYNC_RELAY_PORT}/api/tunnel/${encodeURIComponent(userId)}/active`,
+      {
+        method: 'POST',
+        headers: {
+          'X-User-Id': userId,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ machineId: req.body?.machineId ?? null }),
+        signal: AbortSignal.timeout(10000),
+      }
+    );
+    const body = await upstream.text();
+    res.status(upstream.status);
+    res.setHeader('Content-Type', upstream.headers.get('content-type') || 'application/json');
+    return res.send(body);
+  } catch (err) {
+    console.error('[api/machines/active] proxy error:', err.message);
+    return res.status(502).json({ error: 'sync-relay unavailable' });
+  }
+});
+
 // ── POST /api/runtime/recover ──────────────────────────────────────
 // Force-recover the current user's Python runtime and hot-update editor routing.
 router.post('/api/runtime/recover', requireAuth, async (req, res) => {

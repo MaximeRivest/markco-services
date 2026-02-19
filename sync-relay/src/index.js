@@ -544,14 +544,86 @@ async function handleCatalogApiRequest(req, res, url) {
 //
 // Room key: userId (one tunnel per user — the provider handles all projects)
 
-/** @type {Map<string, { provider: WebSocket|null, providerMeta: object|null, consumers: Set<WebSocket> }>} */
+/**
+ * Multi-provider tunnel rooms.
+ * Each user can have multiple machines connected as providers simultaneously.
+ * One is marked "active" and receives consumer runtime traffic.
+ *
+ * @type {Map<string, {
+ *   providers: Map<string, { ws: WebSocket, meta: object }>,
+ *   activeMachineId: string|null,
+ *   consumers: Set<WebSocket>
+ * }>}
+ */
 const tunnelRooms = new Map();
 
 function getTunnelRoom(userId) {
   if (!tunnelRooms.has(userId)) {
-    tunnelRooms.set(userId, { provider: null, providerMeta: null, consumers: new Set() });
+    tunnelRooms.set(userId, {
+      providers: new Map(),
+      activeMachineId: null,
+      consumers: new Set(),
+    });
   }
   return tunnelRooms.get(userId);
+}
+
+/** Get the active provider entry (ws + meta) or null. */
+function getActiveProvider(room) {
+  if (!room.activeMachineId) return null;
+  const entry = room.providers.get(room.activeMachineId);
+  if (entry && entry.ws.readyState === 1) return entry;
+  return null;
+}
+
+/** Auto-select an active provider if none is set or current one is gone. */
+function autoSelectActive(room) {
+  // If current active is still connected, keep it
+  const current = room.activeMachineId ? room.providers.get(room.activeMachineId) : null;
+  if (current && current.ws.readyState === 1) return;
+
+  // Pick the first connected provider
+  for (const [machineId, entry] of room.providers) {
+    if (entry.ws.readyState === 1) {
+      room.activeMachineId = machineId;
+      console.log(`[tunnel] Auto-selected active machine: ${machineId}`);
+      return;
+    }
+  }
+
+  // No providers available
+  room.activeMachineId = null;
+}
+
+/** Build list of all providers with status for consumer notification. */
+function buildMachineList(room) {
+  const machines = [];
+  for (const [machineId, entry] of room.providers) {
+    machines.push({
+      machineId,
+      ...entry.meta,
+      active: machineId === room.activeMachineId,
+      connected: entry.ws.readyState === 1,
+    });
+  }
+  return machines;
+}
+
+/** Notify all consumers about current machine state. */
+function notifyConsumers(room) {
+  const active = getActiveProvider(room);
+  const status = JSON.stringify({
+    t: 'provider-status',
+    available: !!active,
+    provider: active?.meta || null,
+    activeMachineId: room.activeMachineId,
+    machines: buildMachineList(room),
+  });
+  for (const consumer of room.consumers) {
+    if (consumer.readyState === 1) {
+      try { consumer.send(status); } catch {}
+    }
+  }
 }
 
 function buildProviderMeta(req, url, existing = {}) {
@@ -591,37 +663,32 @@ function handleTunnelConnection(ws, req) {
   const room = getTunnelRoom(userId);
 
   if (role === 'provider') {
-    // Electron desktop app
-    if (room.provider && room.provider.readyState === 1) {
-      // Replace stale provider
-      try { room.provider.close(1000, 'Replaced by new provider'); } catch {}
+    // Electron desktop app / machine-agent
+    const meta = buildProviderMeta(req, url);
+    const machineId = meta.machineId || 'default';
+
+    // If this machine already has a provider connection, replace it
+    const existing = room.providers.get(machineId);
+    if (existing && existing.ws.readyState === 1) {
+      try { existing.ws.close(1000, 'Replaced by new provider connection'); } catch {}
     }
-    room.provider = ws;
-    room.providerMeta = buildProviderMeta(req, url, room.providerMeta || {});
-    const _machineId = room.providerMeta.machineId;
-    console.log(`[tunnel] Provider connected for user ${userId} (${room.providerMeta.machineName || _machineId || 'unknown-machine'})`);
+
+    room.providers.set(machineId, { ws, meta });
+    console.log(`[tunnel] Provider connected: ${meta.machineName || machineId} for user ${userId} (${room.providers.size} total)`);
+
+    // Auto-select if no active machine or this is the only one
+    autoSelectActive(room);
 
     // Register machine as online in the database
-    if (_machineId) {
-      upsertMachine(userId, _machineId, {
-        machineName: room.providerMeta.machineName,
-        hostname: room.providerMeta.hostname,
-        capabilities: room.providerMeta.capabilities,
-        status: 'online',
-      }).catch(err => console.warn('[tunnel] Failed to register machine:', err.message));
-    }
+    upsertMachine(userId, machineId, {
+      machineName: meta.machineName,
+      hostname: meta.hostname,
+      capabilities: meta.capabilities,
+      status: 'online',
+    }).catch(err => console.warn('[tunnel] Failed to register machine:', err.message));
 
-    // Notify existing consumers that provider is now available
-    const status = JSON.stringify({
-      t: 'provider-status',
-      available: true,
-      provider: room.providerMeta,
-    });
-    for (const consumer of room.consumers) {
-      if (consumer.readyState === 1) {
-        try { consumer.send(status); } catch {}
-      }
-    }
+    // Notify all consumers about the new machine list
+    notifyConsumers(room);
 
     ws.on('message', (data) => {
       const msg = typeof data === 'string' ? data : data.toString();
@@ -630,14 +697,17 @@ function handleTunnelConnection(ws, req) {
       try {
         const parsed = JSON.parse(msg);
         if (parsed?.t === 'provider-info') {
-          room.providerMeta = {
-            ...(room.providerMeta || {}),
-            capabilities: parsed.capabilities || room.providerMeta?.capabilities || [],
-            machineId: parsed.machineId || room.providerMeta?.machineId || null,
-            machineName: parsed.machineName || room.providerMeta?.machineName || null,
-            hostname: parsed.hostname || room.providerMeta?.hostname || null,
-            lastSeenAt: new Date().toISOString(),
-          };
+          const entry = room.providers.get(machineId);
+          if (entry) {
+            entry.meta = {
+              ...entry.meta,
+              capabilities: parsed.capabilities || entry.meta.capabilities || [],
+              machineId: parsed.machineId || entry.meta.machineId || machineId,
+              machineName: parsed.machineName || entry.meta.machineName || null,
+              hostname: parsed.hostname || entry.meta.hostname || null,
+              lastSeenAt: new Date().toISOString(),
+            };
+          }
         }
       } catch {
         // Ignore non-JSON messages
@@ -652,20 +722,30 @@ function handleTunnelConnection(ws, req) {
     });
 
     ws.on('close', () => {
-      if (room.provider === ws) {
-        room.provider = null;
-        const disconnectedMachineId = room.providerMeta?.machineId;
-        console.log(`[tunnel] Provider disconnected for user ${userId}`);
-        // Notify consumers that provider is gone
-        const gone = JSON.stringify({ t: 'provider-gone' });
-        for (const consumer of room.consumers) {
-          try { consumer.send(gone); } catch {}
+      const entry = room.providers.get(machineId);
+      if (entry && entry.ws === ws) {
+        room.providers.delete(machineId);
+        console.log(`[tunnel] Provider disconnected: ${machineId} for user ${userId} (${room.providers.size} remaining)`);
+
+        // Auto-select another provider if this was the active one
+        if (room.activeMachineId === machineId) {
+          room.activeMachineId = null;
+          autoSelectActive(room);
         }
+
+        // Notify consumers
+        if (room.providers.size === 0) {
+          const gone = JSON.stringify({ t: 'provider-gone' });
+          for (const consumer of room.consumers) {
+            try { consumer.send(gone); } catch {}
+          }
+        } else {
+          notifyConsumers(room);
+        }
+
         // Mark machine offline in database
-        if (disconnectedMachineId) {
-          setMachineOffline(userId, disconnectedMachineId)
-            .catch(err => console.warn('[tunnel] Failed to set machine offline:', err.message));
-        }
+        setMachineOffline(userId, machineId)
+          .catch(err => console.warn('[tunnel] Failed to set machine offline:', err.message));
       }
     });
   } else {
@@ -673,19 +753,23 @@ function handleTunnelConnection(ws, req) {
     room.consumers.add(ws);
     console.log(`[tunnel] Consumer connected for user ${userId} (${room.consumers.size} total)`);
 
-    // Tell consumer if provider is available
+    // Tell consumer about all available machines
+    const active = getActiveProvider(room);
     const status = JSON.stringify({
       t: 'provider-status',
-      available: !!(room.provider && room.provider.readyState === 1),
-      provider: room.providerMeta || null,
+      available: !!active,
+      provider: active?.meta || null,
+      activeMachineId: room.activeMachineId,
+      machines: buildMachineList(room),
     });
     ws.send(status);
 
     ws.on('message', (data) => {
-      // Forward consumer messages to provider
-      if (room.provider && room.provider.readyState === 1) {
+      // Forward consumer messages to the ACTIVE provider only
+      const activeEntry = getActiveProvider(room);
+      if (activeEntry) {
         const msg = typeof data === 'string' ? data : data.toString();
-        try { room.provider.send(msg); } catch {}
+        try { activeEntry.ws.send(msg); } catch {}
       }
     });
 
@@ -699,31 +783,131 @@ function handleTunnelConnection(ws, req) {
 }
 
 /**
- * Handle tunnel status HTTP API.
- * GET /api/tunnel/<userId> → { available: bool, consumers: number }
+ * Handle tunnel HTTP API.
+ *
+ * GET  /api/tunnel/<userId>             — tunnel status + machine list
+ * GET  /api/tunnel/<userId>/machines    — list connected machines
+ * GET  /api/tunnel/<userId>/active      — get active machine
+ * POST /api/tunnel/<userId>/active      — set active machine (body: {machineId})
  */
 async function handleTunnelApiRequest(req, res, url) {
-  const match = url.pathname.match(/^\/api\/tunnel\/([^/]+)$/);
-  if (!match) return false;
+  // ── GET /api/tunnel/<userId> — overall status
+  const statusMatch = url.pathname.match(/^\/api\/tunnel\/([^/]+)$/);
+  if (statusMatch && req.method === 'GET') {
+    const userId = decodeURIComponent(statusMatch[1]);
+    const authedUserId = await authenticateHttpRequest(req);
+    if (!authedUserId) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Unauthorized' }));
+      return true;
+    }
 
-  const userId = decodeURIComponent(match[1]);
-  const authedUserId = await authenticateHttpRequest(req);
-  if (!authedUserId) {
-    res.writeHead(401, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Unauthorized' }));
+    const room = tunnelRooms.get(userId);
+    const active = room ? getActiveProvider(room) : null;
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      available: !!active,
+      consumers: room?.consumers.size || 0,
+      activeMachineId: room?.activeMachineId || null,
+      provider: active?.meta || null,
+      machines: room ? buildMachineList(room) : [],
+    }));
     return true;
   }
 
-  const room = tunnelRooms.get(userId);
-  const available = !!(room?.provider && room.provider.readyState === 1);
+  // ── GET /api/tunnel/<userId>/machines — list connected machines
+  const machinesMatch = url.pathname.match(/^\/api\/tunnel\/([^/]+)\/machines$/);
+  if (machinesMatch && req.method === 'GET') {
+    const userId = decodeURIComponent(machinesMatch[1]);
+    const authedUserId = await authenticateHttpRequest(req);
+    if (!authedUserId) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Unauthorized' }));
+      return true;
+    }
 
-  res.writeHead(200, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({
-    available,
-    consumers: room?.consumers.size || 0,
-    provider: available ? (room?.providerMeta || null) : null,
-  }));
-  return true;
+    const room = tunnelRooms.get(userId);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      activeMachineId: room?.activeMachineId || null,
+      machines: room ? buildMachineList(room) : [],
+    }));
+    return true;
+  }
+
+  // ── GET /api/tunnel/<userId>/active — get active machine
+  const activeGetMatch = url.pathname.match(/^\/api\/tunnel\/([^/]+)\/active$/);
+  if (activeGetMatch && req.method === 'GET') {
+    const userId = decodeURIComponent(activeGetMatch[1]);
+    const authedUserId = await authenticateHttpRequest(req);
+    if (!authedUserId) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Unauthorized' }));
+      return true;
+    }
+
+    const room = tunnelRooms.get(userId);
+    const active = room ? getActiveProvider(room) : null;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      activeMachineId: room?.activeMachineId || null,
+      provider: active?.meta || null,
+    }));
+    return true;
+  }
+
+  // ── POST /api/tunnel/<userId>/active — set active machine
+  const activePostMatch = url.pathname.match(/^\/api\/tunnel\/([^/]+)\/active$/);
+  if (activePostMatch && req.method === 'POST') {
+    const userId = decodeURIComponent(activePostMatch[1]);
+    const authedUserId = await authenticateHttpRequest(req);
+    if (!authedUserId) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Unauthorized' }));
+      return true;
+    }
+
+    let body = '';
+    for await (const chunk of req) body += chunk;
+    let payload;
+    try { payload = JSON.parse(body); } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid JSON' }));
+      return true;
+    }
+
+    const { machineId } = payload;
+    const room = getTunnelRoom(userId);
+
+    if (machineId) {
+      const entry = room.providers.get(machineId);
+      if (!entry || entry.ws.readyState !== 1) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Machine not connected', machineId }));
+        return true;
+      }
+      room.activeMachineId = machineId;
+    } else {
+      // null = auto-select
+      room.activeMachineId = null;
+      autoSelectActive(room);
+    }
+
+    // Notify all consumers about the change
+    notifyConsumers(room);
+
+    const active = getActiveProvider(room);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      ok: true,
+      activeMachineId: room.activeMachineId,
+      provider: active?.meta || null,
+    }));
+    return true;
+  }
+
+  return false;
 }
 
 // ─── Start ──────────────────────────────────────────────────────────────────
@@ -772,18 +956,22 @@ async function start() {
       }
     }
 
-    // Find provider for this user
+    // Find a provider for this user that can bridge this doc
     const room = tunnelRooms.get(userId);
-    if (!room?.provider || room.provider.readyState !== 1) return;
+    if (!room || room.providers.size === 0) return;
 
-    // Send bridge-request to the provider
-    try {
-      room.provider.send(JSON.stringify({
-        t: 'bridge-request',
-        project,
-        docPath: cleanDocPath,
-      }));
-    } catch { /* ignore */ }
+    // Send bridge-request to ALL connected providers
+    // (the one that has the doc will bridge it; others will ignore)
+    const bridgeMsg = JSON.stringify({
+      t: 'bridge-request',
+      project,
+      docPath: cleanDocPath,
+    });
+    for (const [, entry] of room.providers) {
+      if (entry.ws.readyState === 1) {
+        try { entry.ws.send(bridgeMsg); } catch {}
+      }
+    }
   }
 
   const server = createServer({
