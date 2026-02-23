@@ -1468,6 +1468,46 @@ router.get('/api/catalog', requireAuth, async (req, res) => {
   }
 });
 
+// ── POST /api/catalog/:userId/:machineId ───────────────────────────
+// Proxy catalog push from Electron (machine file manifest upload).
+// Electron currently sends /api/catalog/<userId>/<machineId> with bearer auth.
+router.post('/api/catalog/:userId/:machineId', requireAuth, async (req, res) => {
+  const authUserId = req.user.id;
+  const routeUserId = String(req.params.userId || '');
+  const machineId = String(req.params.machineId || '');
+
+  if (!machineId) {
+    return res.status(400).json({ error: 'machineId is required' });
+  }
+
+  // Security: user in path must match authenticated user.
+  if (routeUserId && routeUserId !== authUserId) {
+    return res.status(403).json({ error: 'userId mismatch' });
+  }
+
+  const relayUrl = `http://127.0.0.1:${SYNC_RELAY_PORT}/api/catalog/${encodeURIComponent(authUserId)}/${encodeURIComponent(machineId)}`;
+
+  try {
+    const upstream = await fetch(relayUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-User-Id': authUserId,
+      },
+      body: JSON.stringify(req.body || {}),
+      signal: AbortSignal.timeout(15000),
+    });
+
+    const body = await upstream.text();
+    res.status(upstream.status);
+    res.setHeader('Content-Type', upstream.headers.get('content-type') || 'application/json');
+    return res.send(body);
+  } catch (err) {
+    console.error('[api/catalog:push] proxy error:', err.message);
+    return res.status(502).json({ error: 'sync-relay unavailable' });
+  }
+});
+
 // ── GET /api/machines ──────────────────────────────────────────────
 // Proxy to sync-relay machines API — list connected machines with status.
 router.get('/api/machines', requireAuth, async (req, res) => {
