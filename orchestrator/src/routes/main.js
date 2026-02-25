@@ -140,7 +140,7 @@ function escapeHtml(value) {
 
 function pwaHeadTags() {
   return `
-  <meta name="theme-color" content="#1e1e1e" />
+  <meta name="theme-color" content="#1a1b2e" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <link rel="manifest" href="/manifest.webmanifest" />
@@ -420,61 +420,61 @@ function renderPage(title, body, { landing = false } = {}) {
   ${pwaHeadTags()}
   ${analyticsScriptTag()}
   <style>
-    /* ── Dark (default / midnight) ─────────────────────────── */
+    /* ── Dark (default / wizard-study-dark) ───────────────── */
     :root {
-      --bg: #1e1e1e;
-      --bg-subtle: #252526;
-      --card: #252526;
-      --card-elevated: #2d2d2d;
-      --muted: #888888;
-      --text: #cccccc;
-      --text-bright: #e0e0e0;
-      --accent: #6495ed;
-      --accent-hover: #7ba6f7;
-      --accent-muted: rgba(100, 149, 237, 0.12);
-      --success: #4caf50;
-      --error: #f44336;
-      --border: #3c3c3c;
+      --bg: #1a1b2e;
+      --bg-subtle: #222336;
+      --card: #2a2b3d;
+      --card-elevated: #3d3552;
+      --muted: #8a7a5e;
+      --text: #d4c4a8;
+      --text-bright: #ebe0cc;
+      --accent: #c8a654;
+      --accent-hover: #e8c874;
+      --accent-muted: rgba(200, 166, 84, 0.12);
+      --success: #8aab7c;
+      --error: #c47862;
+      --border: #3d3552;
       --border-subtle: rgba(255, 255, 255, 0.08);
       --shadow: 0 8px 32px rgba(0,0,0,.4);
-      --code-bg: rgba(255, 255, 255, 0.06);
-      --hover-bg: rgba(255, 255, 255, 0.05);
-      --syntax-keyword: #569cd6;
-      --syntax-string: #ce9178;
-      --syntax-comment: #6a9955;
-      --syntax-function: #dcdcaa;
-      --syntax-number: #b5cea8;
-      --syntax-property: #9cdcfe;
-      --syntax-punctuation: #808080;
+      --code-bg: rgba(42, 43, 61, 0.6);
+      --hover-bg: rgba(200, 166, 84, 0.08);
+      --syntax-keyword: #a87cc4;
+      --syntax-string: #8aab7c;
+      --syntax-comment: #5a5b6d;
+      --syntax-function: #7c8ec4;
+      --syntax-number: #c8a654;
+      --syntax-property: #9caed4;
+      --syntax-punctuation: #8a7a5e;
     }
 
-    /* ── Light (daylight) ──────────────────────────────────── */
+    /* ── Light (wizard-study-light) ────────────────────────── */
     @media (prefers-color-scheme: light) {
       :root {
-        --bg: #ffffff;
-        --bg-subtle: #fafafa;
-        --card: #ffffff;
-        --card-elevated: #fafafa;
-        --muted: #78909c;
-        --text: #37474f;
-        --text-bright: #000000;
-        --accent: #1976d2;
-        --accent-hover: #1565c0;
-        --accent-muted: rgba(25, 118, 210, 0.08);
-        --success: #388e3c;
-        --error: #d32f2f;
-        --border: #e0e0e0;
+        --bg: #f2e8d5;
+        --bg-subtle: #eaddc8;
+        --card: #f2e8d5;
+        --card-elevated: #e8dcc6;
+        --muted: #6a6480;
+        --text: #2a2540;
+        --text-bright: #2a2540;
+        --accent: #a07830;
+        --accent-hover: #8a6a20;
+        --accent-muted: rgba(160, 120, 48, 0.08);
+        --success: #4a7a42;
+        --error: #a04040;
+        --border: #d4c4a8;
         --border-subtle: rgba(0, 0, 0, 0.06);
         --shadow: 0 2px 8px rgba(0,0,0,.08);
-        --code-bg: #f5f5f5;
-        --hover-bg: rgba(0, 0, 0, 0.03);
-        --syntax-keyword: #0d47a1;
-        --syntax-string: #2e7d32;
-        --syntax-comment: #757575;
-        --syntax-function: #6a1b9a;
-        --syntax-number: #e65100;
-        --syntax-property: #0d47a1;
-        --syntax-punctuation: #90a4ae;
+        --code-bg: rgba(212, 196, 168, 0.5);
+        --hover-bg: rgba(160, 120, 48, 0.08);
+        --syntax-keyword: #7a4a8a;
+        --syntax-string: #4a7a42;
+        --syntax-comment: #a49478;
+        --syntax-function: #3a5a9a;
+        --syntax-number: #8a6a20;
+        --syntax-property: #4a72b8;
+        --syntax-punctuation: #6a6480;
       }
     }
 
@@ -845,7 +845,7 @@ router.get('/manifest.webmanifest', (_req, res) => {
     scope: '/',
     display: 'standalone',
     orientation: 'any',
-    theme_color: '#1e1e1e',
+    theme_color: '#1a1b2e',
     background_color: '#1e1e1e',
     icons: [
       { src: '/pwa/icon-128.png', sizes: '128x128', type: 'image/png' },
