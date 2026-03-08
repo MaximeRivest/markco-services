@@ -21,15 +21,6 @@ const SERVICE_DEFS = [
     env: { PORT: '3001' },
   },
   {
-    name: 'compute-manager',
-    dir: resolve(SERVICES_DIR, 'compute-manager'),
-    command: 'node',
-    args: ['src/index.js'],
-    port: 3002,
-    healthPath: '/health',
-    env: { PORT: '3002' },
-  },
-  {
     name: 'publish-service',
     dir: resolve(SERVICES_DIR, 'publish-service'),
     command: 'node',
@@ -37,15 +28,6 @@ const SERVICE_DEFS = [
     port: 3003,
     healthPath: '/@_health/_check', // will 404 but that means it's up
     env: { PORT: '3003' },
-  },
-  {
-    name: 'resource-monitor',
-    dir: resolve(SERVICES_DIR, 'resource-monitor'),
-    command: 'node',
-    args: ['src/index.js'],
-    port: 3004,
-    healthPath: '/health',
-    env: { PORT: '3004' },
   },
   {
     name: 'sync-relay',

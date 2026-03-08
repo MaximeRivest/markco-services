@@ -51,13 +51,13 @@ export function generateCaddyConfig() {
                   upstreams: [{ dial: 'localhost:3001' }],
                 }],
               },
-              // Join/invite routes
+              // Join/invite routes → orchestrator (serves join + collab pages)
               {
                 '@id': 'join',
-                match: matchPath('/join/*'),
+                match: [{ host: HOSTS, path: ['/join/*', '/collab/*'] }],
                 handle: [{
                   handler: 'reverse_proxy',
-                  upstreams: [{ dial: 'localhost:3001' }],
+                  upstreams: [{ dial: 'localhost:3000' }],
                 }],
               },
               // Umami analytics: tracking script
@@ -101,7 +101,7 @@ export function generateCaddyConfig() {
                 '@id': 'orchestrator-pages',
                 match: [{
                   host: HOSTS,
-                  path: ['/login', '/login/*', '/dashboard', '/sandbox', '/hooks/*', '/projects/*', '/u/*', '/logout', '/api/logout', '/.well-known/assetlinks.json'],
+                  path: ['/login', '/login/*', '/dashboard', '/sandbox', '/logout', '/api/logout', '/.well-known/assetlinks.json', '/privacy', '/terms', '/account-delete', '/offline'],
                 }],
                 handle: [{
                   handler: 'reverse_proxy',

@@ -1,12 +1,11 @@
 /**
  * Main user-facing routes for the orchestrator.
- * Handles auth flow, dashboard, and user editor proxying.
+ * Handles auth flow, dashboard, sandbox pages, and misc site routes.
  */
 
 import { readFile, rm } from 'node:fs/promises';
 import { Router } from 'express';
-import { authService, computeManager } from '../service-client.js';
-import { onUserLogin, onUserLogout, getEditorInfo, notifyRuntimePortChange } from '../user-lifecycle.js';
+import { authService } from '../service-client.js';
 
 const router = Router();
 
@@ -160,7 +159,7 @@ function pwaHeadTags() {
 function pwaServiceWorkerSource() {
   return `const CACHE_NAME = 'markco-pwa-v1';
 const PRECACHE = ['/offline', '/manifest.webmanifest', '/pwa/icon-128.png', '/pwa/icon-256.png', '/pwa/icon-512.png', '/favicon.ico'];
-const BYPASS_PREFIXES = ['/api/', '/auth/', '/hooks/', '/join/', '/projects/', '/u/'];
+const BYPASS_PREFIXES = ['/api/', '/auth/', '/join/'];
 const BYPASS_PATHS = new Set(['/login', '/dashboard', '/logout', '/api/logout']);
 
 self.addEventListener('install', (event) => {
@@ -821,14 +820,7 @@ async function completeLogin(res, user, token, expiresAt) {
   const isElectron = res.req?.cookies?.electron_auth === '1';
   if (isElectron) {
     res.clearCookie('electron_auth');
-    // Don't start editor containers for Electron auth — just return the token
     return res.redirect(`/auth/electron/success?token=${encodeURIComponent(token)}`);
-  }
-
-  try {
-    await onUserLogin(user);
-  } catch (err) {
-    console.error(`[callback] Failed to start editor for ${user.id}: ${err.message}`);
   }
 
   res.redirect('/dashboard');
@@ -1337,32 +1329,16 @@ router.get('/auth/email/verify', async (req, res) => {
 // ── GET /dashboard ────────────────────────────────────────────────────
 router.get('/dashboard', requireAuth, async (req, res) => {
   const user = req.user;
-  let editor = getEditorInfo(user.id);
-
-  if (!editor) {
-    try {
-      await onUserLogin(user);
-      editor = getEditorInfo(user.id);
-    } catch (err) {
-      console.error(`[dashboard] Failed to auto-start editor for ${user.id}: ${err.message}`);
-    }
-  }
 
   if (htmlMode(req)) {
     const safeName = escapeHtml(user.name || user.email || user.username || 'friend');
-    const editorUrl = editor ? `/u/${user.id}/` : null;
-    const statusBadge = editor
-      ? '<span class="pill">workspace ready</span>'
-      : '<span class="pill" style="border-color:#e65100;background:rgba(255,152,0,0.08);color:#ff9800">starting…</span>';
 
     const body = `<div class="page-card"><main class="card">
       <h1>Welcome back, ${safeName}</h1>
-      <p>Your workspace is running on markco.dev. ${statusBadge}</p>
+      <p>markco.dev now focuses on authentication, sharing, collaboration, and publishing.</p>
 
       <div class="row" style="margin-top:24px">
-        ${editorUrl
-    ? `<a class="btn primary" href="${editorUrl}">Open Editor</a>`
-    : '<button class="btn" disabled>Starting workspace...</button>'}
+        <a class="btn primary" href="/">Open home</a>
         <a class="btn ghost" href="/sandbox">Open Guest Sandbox</a>
       </div>
 
@@ -1395,13 +1371,6 @@ router.get('/dashboard', requireAuth, async (req, res) => {
       name: user.name,
       plan: user.plan,
     },
-    editor: editor
-      ? {
-        host: editor.host,
-        editorPort: editor.editorPort,
-        runtimePort: editor.runtimePort,
-      }
-      : null,
   });
 });
 
@@ -1577,122 +1546,9 @@ router.post('/api/machines/active', requireAuth, async (req, res) => {
   }
 });
 
-// ── POST /api/runtime/recover ──────────────────────────────────────
-// Force-recover the current user's Python runtime and hot-update editor routing.
-router.post('/api/runtime/recover', requireAuth, async (req, res) => {
-  const user = req.user;
-  let editor = getEditorInfo(user.id);
-
-  // Ensure editor exists
-  if (!editor) {
-    try {
-      await onUserLogin(user);
-      editor = getEditorInfo(user.id);
-    } catch (err) {
-      console.error('[runtime:recover] Failed to start editor:', err.message);
-      return res.status(500).json({ error: 'Editor unavailable' });
-    }
-  }
-
-  // Fast path: if current runtime responds, no-op
-  if (editor?.runtimePort) {
-    try {
-      const caps = await fetch(`http://127.0.0.1:${editor.runtimePort}/mrp/v1/capabilities`, {
-        signal: AbortSignal.timeout(3000),
-      });
-      if (caps.ok) {
-        return res.json({ ok: true, recovered: false, port: editor.runtimePort });
-      }
-    } catch {
-      // continue to recovery path
-    }
-  }
-
-  try {
-    const probeRuntime = async (port, timeoutMs = 20000) => {
-      const start = Date.now();
-      while (Date.now() - start < timeoutMs) {
-        try {
-          const caps = await fetch(`http://127.0.0.1:${port}/mrp/v1/capabilities`, {
-            signal: AbortSignal.timeout(3000),
-          });
-          if (caps.ok) return true;
-        } catch {
-          // keep polling until timeout
-        }
-        await new Promise(r => setTimeout(r, 500));
-      }
-      return false;
-    };
-
-    let runtime = await computeManager.startRuntime(user.id, user.plan || 'free');
-
-    // If compute-manager returned a "running" runtime that still doesn't answer,
-    // force a fresh runtime once.
-    let reachable = false;
-    try {
-      reachable = await probeRuntime(runtime.port);
-    } catch {
-      reachable = false;
-    }
-
-    if (!reachable) {
-      console.warn(`[runtime:recover] Runtime ${runtime.container_name} not reachable on ${runtime.port}, recreating`);
-      try {
-        await computeManager.stopRuntime(user.id);
-      } catch {
-        // best effort
-      }
-      runtime = await computeManager.startRuntime(user.id, user.plan || 'free');
-
-      reachable = false;
-      try {
-        reachable = await probeRuntime(runtime.port);
-      } catch {
-        reachable = false;
-      }
-      if (!reachable) {
-        throw new Error(`Recovered runtime is still unreachable on port ${runtime.port}`);
-      }
-    }
-
-    // Update in-memory editor mapping
-    if (editor) {
-      editor.runtimeId = runtime.runtime_id;
-      editor.runtimeContainer = runtime.container_name;
-      editor.runtimePort = runtime.port;
-      editor.plan = user.plan || 'free';
-    }
-
-    // Tell mrmd-server to route Python requests to the new runtime port
-    await notifyRuntimePortChange(user.id, runtime.port, runtime.host || 'localhost');
-
-    return res.json({
-      ok: true,
-      recovered: true,
-      runtime: {
-        id: runtime.runtime_id,
-        container_name: runtime.container_name,
-        host: runtime.host,
-        port: runtime.port,
-        state: runtime.state,
-      },
-    });
-  } catch (err) {
-    console.error('[runtime:recover] Recovery failed:', err.message);
-    return res.status(502).json({ error: 'Runtime recovery failed', detail: err.message });
-  }
-});
-
 // ── POST /api/account/delete ────────────────────────────────────────
 router.post('/api/account/delete', requireAuth, async (req, res) => {
   const userId = req.user.id;
-
-  try {
-    await onUserLogout(userId);
-  } catch (err) {
-    console.warn('[account-delete] Lifecycle cleanup warning:', err.message);
-  }
 
   try {
     await authService.deleteAccount(req.sessionToken);
@@ -1717,30 +1573,14 @@ router.post('/api/account/delete', requireAuth, async (req, res) => {
 // ── POST /logout & /api/logout ───────────────────────────────────────
 async function handleLogout(req, res) {
   const token = extractToken(req);
-  let userId = null;
 
   if (token) {
-    try {
-      const { user } = await authService.validate(token);
-      userId = user?.id || null;
-    } catch {
-      // already invalid/expired
-    }
-
     try {
       await authService.logout(token);
     } catch (err) {
       if (err.status !== 401) {
         console.warn('[logout] Auth service logout warning:', err.message);
       }
-    }
-  }
-
-  if (userId) {
-    try {
-      await onUserLogout(userId);
-    } catch (err) {
-      console.warn('[logout] User lifecycle warning:', err.message);
     }
   }
 
@@ -2321,96 +2161,5 @@ router.get('/sandbox', async (_req, res) => {
 });
 
 // (Old textarea sandbox removed — replaced by full editor sandbox above)
-
-// ── POST /projects/import ─────────────────────────────────────────────
-router.post('/projects/import', requireAuth, async (req, res) => {
-  const { repo_url: repoUrl, name } = req.body;
-  if (!repoUrl) {
-    return res.status(400).json({ error: 'repo_url required' });
-  }
-
-  const userId = req.user.id;
-  const projectName = name || repoUrl.split('/').pop().replace('.git', '');
-  const dataDir = process.env.DATA_DIR || '/data/users';
-  const projectDir = `${dataDir}/${userId}/Projects/${projectName}`;
-
-  try {
-    const { execFile } = await import('node:child_process');
-    const { promisify } = await import('node:util');
-    const exec = promisify(execFile);
-
-    await exec('mkdir', ['-p', `${dataDir}/${userId}/Projects`]);
-    await exec('git', ['clone', '--depth', '1', repoUrl, projectDir], { timeout: 60000 });
-
-    return res.status(201).json({
-      project: projectName,
-      path: projectDir,
-      url: `/u/${userId}/?project=${encodeURIComponent(projectName)}`,
-    });
-  } catch (err) {
-    console.error('[import] Clone error:', err.message);
-    return res.status(500).json({ error: `Import failed: ${err.message}` });
-  }
-});
-
-// ── User editor reverse proxy ─────────────────────────────────────────
-router.use('/u/:userId', requireAuth, async (req, res) => {
-  const { userId } = req.params;
-
-  if (userId !== req.user.id) {
-    return res.status(403).send('Forbidden');
-  }
-
-  let editor = getEditorInfo(userId);
-  if (!editor) {
-    try {
-      await onUserLogin(req.user);
-      editor = getEditorInfo(userId);
-    } catch (err) {
-      console.error(`[proxy] Failed to start editor for ${userId}: ${err.message}`);
-    }
-  }
-
-  if (!editor) {
-    return res.redirect('/dashboard');
-  }
-
-  const targetUrl = `http://localhost:${editor.editorPort}${req.url}`;
-
-  try {
-    const headers = { ...req.headers };
-    delete headers.host;
-    headers['x-forwarded-for'] = req.ip;
-    headers['x-forwarded-proto'] = req.protocol;
-
-    const proxyRes = await fetch(targetUrl, {
-      method: req.method,
-      headers,
-      body: ['GET', 'HEAD'].includes(req.method) ? undefined : JSON.stringify(req.body),
-      signal: AbortSignal.timeout(30000),
-      redirect: 'manual',
-    });
-
-    res.status(proxyRes.status);
-    proxyRes.headers.forEach((value, key) => {
-      if (!['content-encoding', 'transfer-encoding', 'content-length'].includes(key.toLowerCase())) {
-        res.setHeader(key, value);
-      }
-    });
-
-    const contentType = (proxyRes.headers.get('content-type') || '').toLowerCase();
-    const buffer = Buffer.from(await proxyRes.arrayBuffer());
-
-    if (contentType.includes('text/html')) {
-      const html = injectPwaAndAnalyticsIntoHtml(buffer.toString('utf8'));
-      return res.type('html').send(html);
-    }
-
-    return res.send(buffer);
-  } catch (err) {
-    console.error(`[proxy] Error proxying to ${targetUrl}: ${err.message}`);
-    res.status(502).send('Editor proxy error');
-  }
-});
 
 export default router;

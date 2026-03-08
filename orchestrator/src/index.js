@@ -1,7 +1,7 @@
 /**
  * markco.dev orchestrator — the single entry point for the platform.
  *
- * Starts all Layer 3 services, configures Caddy, registers webhooks,
+ * Starts the core services, configures Caddy,
  * and serves as the main HTTP server on port 3000.
  */
 
@@ -9,13 +9,12 @@ import express from 'express';
 import cookieParser from 'cookie-parser';
 import { WebSocket } from 'ws';
 import { startAll, stopAll } from './process-manager.js';
-import { resourceMonitor, authService } from './service-client.js';
+import { authService } from './service-client.js';
 import { loadConfig, healthCheck as caddyHealthCheck } from './caddy.js';
 import { generateCaddyConfig } from './caddy-config.js';
-import { getEditorInfo, reconcileContainers, startHealthChecks } from './user-lifecycle.js';
 import mainRoutes from './routes/main.js';
 import apiRoutes from './routes/api.js';
-import eventHandler from './event-handler.js';
+import shareRoutes, { ensureTunnelClient, getShareAccessForToken } from './routes/shares.js';
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const app = express();
@@ -33,8 +32,8 @@ app.get('/health', (_req, res) => {
 });
 
 // Mount routes
-app.use(eventHandler);
 app.use(apiRoutes);
+app.use(shareRoutes);
 app.use(mainRoutes);
 
 // Error handler
@@ -49,28 +48,17 @@ async function start() {
   // 1. Start all Layer 3 services
   await startAll();
 
-  // 2. Register webhook with resource-monitor so events flow to us
-  try {
-    const webhookUrl = `http://localhost:${PORT}/hooks/resource`;
-    await resourceMonitor.registerWebhook(webhookUrl);
-    console.log(`[orchestrator] Webhook registered: ${webhookUrl}`);
-  } catch (err) {
-    console.warn(`[orchestrator] Failed to register webhook: ${err.message}`);
-  }
-
-  // 3. Start HTTP server
+  // 2. Start HTTP server
   const server = app.listen(PORT, () => {
     console.log(`[orchestrator] Listening on :${PORT}`);
   });
 
-  // WebSocket proxy for editor containers (/u/{userId}/events, /u/{userId}/sync/...)
-  // and sync-relay routing when SYNC_MODE is mirror or relay_primary
+  // WebSocket handling for collaboration and tunnel proxying.
   const { WebSocketServer } = await import('ws');
   const wss = new WebSocketServer({ noServer: true });
 
-  const SYNC_MODE = process.env.SYNC_MODE || 'legacy';
   const SYNC_RELAY_PORT = parseInt(process.env.SYNC_RELAY_PORT || '3006', 10);
-  console.log(`[orchestrator] SYNC_MODE=${SYNC_MODE}, relay port=${SYNC_RELAY_PORT}`);
+  console.log(`[orchestrator] relay port=${SYNC_RELAY_PORT}`);
 
   // Throttle repeated upstream WS errors (stale sync ports can reconnect rapidly).
   const WS_ERROR_LOG_WINDOW_MS = 15000;
@@ -112,6 +100,10 @@ async function start() {
    * Create a bidirectional WebSocket proxy with buffering and error handling.
    * Phase 0 improvement: proper error handling to prevent "socket hang up" spam.
    */
+  function encodePathSegments(value) {
+    return String(value || '').split('/').map(encodeURIComponent).join('/');
+  }
+
   function createWsProxy(clientWs, targetUrl, opts = {}) {
     const { headers = {} } = opts;
     const upstream = new WebSocket(targetUrl, { headers });
@@ -192,38 +184,62 @@ async function start() {
       : null;
     const token = cookies.session_token || url.searchParams.get('token') || bearerToken;
 
-    // ── Direct relay path for desktop/mobile clients ─────────────────────
-    // Path: /sync/:userId/:project/:docPath
-    // This avoids going through /u/:userId/... and editor container routing.
+    // ── Direct collaboration path: browser → tunnel → owner's local sync ──
+    // Path: /api/collab/:shareToken/sync/:docPath
+    const collabSyncMatch = url.pathname.match(/^\/api\/collab\/([^/]+)\/sync\/(.+)$/);
+    if (collabSyncMatch) {
+      const [, shareToken, docPathRaw] = collabSyncMatch;
+      try {
+        const access = await getShareAccessForToken(shareToken, req, { joinIfNeeded: true });
+        const { share } = access;
+        const requestedDocPath = decodeURIComponent(docPathRaw || '');
+        const expectedDocPath = String(share.docPath || '').replace(/^\/+/, '');
+        if (!expectedDocPath || requestedDocPath !== expectedDocPath) {
+          socket.destroy();
+          return;
+        }
+
+        const tunnelClient = await ensureTunnelClient(share.owner.id);
+        const available = await tunnelClient.waitForAvailability(5000);
+        if (!available) {
+          console.warn(`[collab-sync] Tunnel provider unavailable for ${share.owner.id}`);
+          socket.destroy();
+          return;
+        }
+
+        const sync = await tunnelClient.getSharedSyncInfo({
+          sharedProject: share.project,
+          sharedDocPath: expectedDocPath,
+        });
+        if (!sync?.syncPort) {
+          console.warn(`[collab-sync] Missing sync port for ${share.owner.id} ${share.project}/${expectedDocPath}`);
+          socket.destroy();
+          return;
+        }
+
+        wss.handleUpgrade(req, socket, head, (clientWs) => {
+          tunnelClient.wsProxy(sync.syncPort, encodePathSegments(expectedDocPath), clientWs);
+        });
+      } catch (err) {
+        console.warn(`[collab-sync] upgrade failed: ${err?.message || err}`);
+        socket.destroy();
+      }
+      return;
+    }
+
+    // ── Direct relay path for desktop/mobile/collaborator clients ────────
+    // Path: /sync/:ownerId/:project/:docPath
+    // The relay itself performs auth + share checks. We simply proxy through,
+    // forwarding cookie/auth headers when present so same-origin browser
+    // WebSockets work with session cookies.
     const directSyncMatch = url.pathname.match(/^\/sync\/([^/]+)\/([^/]+)\/(.+)$/);
     if (directSyncMatch) {
-      if (!token) { socket.destroy(); return; }
-
-      const [, userIdRaw] = directSyncMatch;
-      const userId = decodeURIComponent(userIdRaw);
-
-      let validatedUser;
-      try {
-        validatedUser = await authService.validate(token);
-      } catch {
-        socket.destroy();
-        return;
-      }
-
-      const validatedUserId = validatedUser?.user?.id;
-      if (!validatedUserId || validatedUserId !== userId) {
-        socket.destroy();
-        return;
-      }
-
       const relayUrl = `ws://localhost:${SYNC_RELAY_PORT}${url.pathname}${url.search}`;
       wss.handleUpgrade(req, socket, head, (clientWs) => {
-        createWsProxy(clientWs, relayUrl, {
-          headers: {
-            Authorization: `Bearer ${token}`,
-            'X-User-Id': userId,
-          },
-        });
+        const headers = {};
+        if (req.headers.authorization) headers.Authorization = req.headers.authorization;
+        if (req.headers.cookie) headers.Cookie = req.headers.cookie;
+        createWsProxy(clientWs, relayUrl, { headers });
       });
       return;
     }
@@ -260,113 +276,7 @@ async function start() {
       return;
     }
 
-    const match = url.pathname.match(/^\/u\/([^/]+)(\/.*)?$/);
-    if (!match) {
-      socket.destroy();
-      return;
-    }
-
-    const [, userId, rest = '/'] = match;
-
-    if (!token) { socket.destroy(); return; }
-
-    let validatedUser;
-    try {
-      validatedUser = await authService.validate(token);
-    } catch { socket.destroy(); return; }
-
-    // ── Sync relay routing ──────────────────────────────────────────────
-    // Match sync paths: /u/:userId/sync/:port/:docPath  (legacy format)
-    // In relay_primary mode, route to sync-relay instead of editor container.
-    const syncMatch = rest?.match(/^\/sync\/(\d+)\/(.+)$/);
-
-    if (syncMatch && (SYNC_MODE === 'relay_primary' || SYNC_MODE === 'mirror')) {
-      const [, legacySyncPort, docPathRaw] = syncMatch;
-
-      // For relay routing, we need to map the legacy URL format to relay format.
-      // Legacy: /sync/:port/:docPath → Relay: /sync/:userId/:project/:docPath
-      // We extract project from the editor context (for now, use "default" as fallback).
-      // The editor container sends the project name as part of the doc path.
-      // TODO: once the editor sends project info, parse it here.
-      const project = 'default';
-      const docPath = docPathRaw;
-
-      if (SYNC_MODE === 'relay_primary') {
-        // Route directly to sync relay
-        const relayUrl = `ws://localhost:${SYNC_RELAY_PORT}/sync/${userId}/${project}/${docPath}`;
-
-        wss.handleUpgrade(req, socket, head, (clientWs) => {
-          createWsProxy(clientWs, relayUrl, {
-            headers: { 'X-User-Id': userId },
-          });
-        });
-        return;
-      }
-
-      if (SYNC_MODE === 'mirror') {
-        // Primary path: editor container (legacy)
-        // Secondary: also mirror to sync relay for durability
-        // IMPORTANT: only open mirror AFTER upstream connects successfully
-        // to prevent reconnect storms when the editor's internal sync port is stale
-        const editor = getEditorInfo(userId);
-        if (!editor) { socket.destroy(); return; }
-
-        const editorUrl = `ws://localhost:${editor.editorPort}${rest}${url.search}`;
-        const relayUrl = `ws://localhost:${SYNC_RELAY_PORT}/sync/${userId}/${project}/${docPath}`;
-
-        wss.handleUpgrade(req, socket, head, (clientWs) => {
-          // Primary: proxy to editor as usual
-          const upstream = createWsProxy(clientWs, editorUrl);
-
-          // Mirror: only open after upstream is connected
-          let mirror = null;
-
-          upstream.on('open', () => {
-            // Now safe to open the mirror — upstream is alive
-            mirror = new WebSocket(relayUrl, {
-              headers: { 'X-User-Id': userId },
-            });
-
-            mirror.on('error', (err) => {
-              // Mirror errors are non-fatal — primary sync still works
-              if (err.code !== 'ECONNREFUSED') {
-                console.warn(`[ws-mirror] Relay error: ${err.code || err.message}`);
-              }
-            });
-          });
-
-          // Forward Yjs updates to mirror (binary messages only)
-          upstream.on('message', (data, isBinary) => {
-            if (isBinary && mirror?.readyState === WebSocket.OPEN) {
-              try { mirror.send(data, { binary: true }); } catch { /* ignore */ }
-            }
-          });
-
-          // Also forward client messages to mirror
-          clientWs.on('message', (data, isBinary) => {
-            if (isBinary && mirror?.readyState === WebSocket.OPEN) {
-              try { mirror.send(data, { binary: true }); } catch { /* ignore */ }
-            }
-          });
-
-          // Clean up mirror on close
-          clientWs.on('close', () => {
-            if (mirror) try { mirror.close(); } catch { /* ignore */ }
-          });
-        });
-        return;
-      }
-    }
-
-    // ── Default: proxy to editor container ──────────────────────────────
-    const editor = getEditorInfo(userId);
-    if (!editor) { socket.destroy(); return; }
-
-    const targetUrl = `ws://localhost:${editor.editorPort}${rest}${url.search}`;
-
-    wss.handleUpgrade(req, socket, head, (clientWs) => {
-      createWsProxy(clientWs, targetUrl);
-    });
+    socket.destroy();
   });
 
   // 4. Apply Caddy config (non-blocking, Caddy may not be running in dev)
@@ -382,16 +292,6 @@ async function start() {
   }
 
   console.log('[orchestrator] Platform ready');
-
-  // 5. Reconcile any running containers from before the restart
-  try {
-    await reconcileContainers();
-  } catch (err) {
-    console.warn(`[orchestrator] Container reconciliation failed: ${err.message}`);
-  }
-
-  // 6. Start periodic health checks for active containers
-  startHealthChecks();
 
   // Graceful shutdown
   async function shutdown(signal) {

@@ -4,6 +4,7 @@ const cookieParser = require('cookie-parser');
 const pool = require('./db');
 const authRoutes = require('./routes/auth');
 const inviteRoutes = require('./routes/invites');
+const shareRoutes = require('./routes/shares');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -24,6 +25,7 @@ app.get('/health', async (_req, res) => {
 
 app.use(authRoutes);
 app.use(inviteRoutes);
+app.use(shareRoutes);
 
 // Run schema on startup, then listen
 async function start() {

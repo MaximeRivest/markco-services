@@ -43,6 +43,8 @@ async function initSchema() {
 
 const AUTH_SERVICE_URL = process.env.AUTH_SERVICE_URL || 'http://localhost:3001';
 const tokenValidationCache = new Map();
+const shareAccessCache = new Map();
+const SHARE_ACCESS_TTL_MS = 10000;
 
 function extractBearerToken(req) {
   const authHeader = req.headers['authorization'];
@@ -52,10 +54,30 @@ function extractBearerToken(req) {
   return null;
 }
 
+function extractCookieToken(req) {
+  const cookieHeader = req.headers['cookie'];
+  if (typeof cookieHeader !== 'string' || !cookieHeader) return null;
+  const parts = cookieHeader.split(';');
+  for (const part of parts) {
+    const [key, ...rest] = part.trim().split('=');
+    if (key === 'session_token') {
+      return decodeURIComponent(rest.join('='));
+    }
+  }
+  return null;
+}
+
+function parseDocName(docName) {
+  if (!docName) return { ownerId: null, project: null, docPath: null };
+  const parts = String(docName).split('/');
+  const ownerId = parts[0] || null;
+  const project = parts[1] || null;
+  const docPath = parts.length > 2 ? parts.slice(2).join('/') : null;
+  return { ownerId, project, docPath };
+}
+
 function getDocUserId(docName) {
-  if (!docName) return null;
-  const [uid] = docName.split('/');
-  return uid || null;
+  return parseDocName(docName).ownerId;
 }
 
 async function validateToken(token) {
@@ -87,8 +109,53 @@ async function validateToken(token) {
   }
 }
 
+async function checkShareAccess({ userId = null, ownerId, project, docPath = null }) {
+  const cacheKey = `${userId || 'anon'}|${ownerId || ''}|${project || ''}|${docPath || ''}`;
+  const now = Date.now();
+  const cached = shareAccessCache.get(cacheKey);
+  if (cached && cached.expiresAt > now) {
+    return cached.value;
+  }
+
+  try {
+    const params = new URLSearchParams();
+    if (userId) params.set('userId', userId);
+    params.set('ownerId', ownerId || '');
+    params.set('project', project || '');
+    if (docPath) params.set('docPath', docPath);
+
+    const res = await fetch(`${AUTH_SERVICE_URL}/shares/check-access?${params.toString()}`, {
+      signal: AbortSignal.timeout(5000),
+    });
+
+    if (!res.ok) {
+      const value = { allowed: false, role: null };
+      shareAccessCache.set(cacheKey, { value, expiresAt: now + 10000 });
+      return value;
+    }
+
+    const data = await res.json();
+    const value = {
+      allowed: data?.allowed === true,
+      role: data?.role || null,
+    };
+    shareAccessCache.set(cacheKey, { value, expiresAt: now + SHARE_ACCESS_TTL_MS });
+    return value;
+  } catch (err) {
+    console.warn('[sync-relay] Share access check failed:', err.message);
+    const value = { allowed: false, role: null };
+    shareAccessCache.set(cacheKey, { value, expiresAt: now + 5000 });
+    return value;
+  }
+}
+
 /**
  * Auth hook for mrmd-sync WebSocket connections.
+ *
+ * Returns either:
+ *   - false            → reject
+ *   - true             → allow (legacy)
+ *   - object metadata  → allow + attach role/read-only policy to the socket
  */
 async function authHandler(req, docName) {
   if (process.env.SYNC_RELAY_NO_AUTH === '1') return true;
@@ -97,23 +164,77 @@ async function authHandler(req, docName) {
   const url = new URL(req.url, 'http://localhost');
   const tokenParam = url.searchParams.get('token');
   const bearerToken = extractBearerToken(req);
-  const token = bearerToken || tokenParam;
+  const cookieToken = extractCookieToken(req);
+  const token = bearerToken || tokenParam || cookieToken;
 
-  const docUserId = getDocUserId(docName);
+  const { ownerId, project, docPath } = parseDocName(docName);
+  if (!ownerId || !project) return false;
 
-  // Trusted proxy path: orchestrator already validated cookie.
-  if (headerUserId) {
-    return !docUserId || docUserId === headerUserId;
+  // Trusted proxy path: only trust X-User-Id when it matches the owner.
+  // Collaborators should authenticate via token/cookie so we can evaluate shares.
+  if (headerUserId && headerUserId === ownerId) {
+    return {
+      userId: headerUserId,
+      ownerId,
+      role: 'editor',
+      readOnly: false,
+      isReadOnly: () => false,
+    };
   }
 
-  // Direct path: validate session token against auth-service.
-  if (!token) return false;
+  // Authenticated user path
+  if (token) {
+    const validatedUserId = await validateToken(token);
+    if (!validatedUserId) return false;
 
-  const validatedUserId = await validateToken(token);
-  if (!validatedUserId) return false;
+    // Owner always has full access.
+    if (validatedUserId === ownerId) {
+      return {
+        userId: validatedUserId,
+        ownerId,
+        role: 'editor',
+        readOnly: false,
+        isReadOnly: () => false,
+      };
+    }
 
-  // Enforce tenant isolation in room path.
-  return !docUserId || docUserId === validatedUserId;
+    // Collaborator path — check explicit share access.
+    const access = await checkShareAccess({
+      userId: validatedUserId,
+      ownerId,
+      project,
+      docPath,
+    });
+
+    if (!access.allowed) return false;
+
+    return {
+      userId: validatedUserId,
+      ownerId,
+      role: access.role || 'viewer',
+      // Dynamic read-only policy: viewers are always read-only; editors become
+      // read-only whenever the owner's machine is offline/paused.
+      isReadOnly: () => (access.role === 'viewer') || !isOwnerOnline(ownerId),
+    };
+  }
+
+  // Anonymous path — only allowed for open shares.
+  const access = await checkShareAccess({
+    userId: null,
+    ownerId,
+    project,
+    docPath,
+  });
+
+  if (!access.allowed) return false;
+
+  return {
+    userId: null,
+    anonymous: true,
+    ownerId,
+    role: access.role || 'viewer',
+    isReadOnly: () => (access.role === 'viewer') || !isOwnerOnline(ownerId),
+  };
 }
 
 // ─── HTTP API for document listing ──────────────────────────────────────────
@@ -130,9 +251,10 @@ async function authenticateHttpRequest(req) {
   if (headerUserId) return headerUserId;
 
   const bearerToken = extractBearerToken(req);
+  const cookieToken = extractCookieToken(req);
   const url = new URL(req.url, 'http://localhost');
   const tokenParam = url.searchParams.get('token');
-  const token = bearerToken || tokenParam;
+  const token = bearerToken || tokenParam || cookieToken;
 
   if (!token) return null;
   return await validateToken(token);
@@ -576,6 +698,13 @@ function getActiveProvider(room) {
   return null;
 }
 
+/** Whether the owner's machine is currently online for live collaboration. */
+function isOwnerOnline(ownerId) {
+  const room = tunnelRooms.get(ownerId);
+  if (!room) return false;
+  return !!getActiveProvider(room);
+}
+
 /** Auto-select an active provider if none is set or current one is gone. */
 function autoSelectActive(room) {
   // If current active is still connected, keep it
@@ -780,6 +909,14 @@ function handleTunnelConnection(ws, req) {
   }
 
   ws.on('error', () => { /* handled by close */ });
+
+  // Keep-alive: ping every 25s to prevent reverse-proxy idle timeouts
+  const pingInterval = setInterval(() => {
+    if (ws.readyState === 1) {
+      try { ws.ping(); } catch { /* ignore */ }
+    }
+  }, 25000);
+  ws.on('close', () => clearInterval(pingInterval));
 }
 
 /**
